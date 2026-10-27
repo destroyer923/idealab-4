@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.local
+
+# Legacy frontend credential artifact must never be recreated or committed.
+src/lib/admin-credentials.json
+
+# Private deployment configuration
+.env
+.env.*
+!.env.example
+artifacts/
