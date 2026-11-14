@@ -3,15 +3,15 @@ import { Building2, Circle, Check, Info, Mail, Phone, RefreshCw, ShieldCheck, Us
 import { cn } from "@/utils/cn";
 import {
   getVerification, getVerifyEvents, getBusinessEvidence, submitBusinessEvidence, reviewBusinessEvidence,
-  updateProviderConfig, isReviewer, getListingReviewQueue, reviewListing, submitIdentityVerification,
-  getIdentityEvidence, reviewIdentityVerification,
-} from "@/lib/api";
-import { BUSINESS_TYPES, OTP_LENGTH, OTP_MAX_ATTEMPTS, OTP_TTL_MINUTES } from "@/lib/verify";
+  updateProviderConfig, getListingReviewQueue, reviewListing, submitIdentityVerification,
+  getIdentityEvidence, reviewIdentityVerification, requestVerificationCode, verifyContactCode,
+} from "@/lib/verification-api";
+import { BUSINESS_TYPES, OTP_LENGTH, OTP_MAX_ATTEMPTS, OTP_RESEND_MIN_MS, OTP_TTL_MINUTES } from "@/lib/verify";
 import { L, useI18n, type Key } from "@/lib/i18n";
 import { useQuery } from "@/lib/hooks";
 import { navigate } from "@/lib/router";
 import type { BusinessEvidence, BusinessType, CheckStatus } from "@/lib/types";
-import { Button, Card, ErrorState, Field, Input, SectionTitle, Select, Textarea, errMsg, focusRing, toast } from "@/components/ui";
+import { Button, Card, ErrorState, Field, Input, SectionTitle, Select, Spinner, Textarea, errMsg, focusRing, toast } from "@/components/ui";
 import { TrustBadges, TrustLevel } from "@/components/trust";
 
 /** One verification check row: status, what it means, and the action available. */
@@ -63,8 +63,16 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [lastCode, setLastCode] = useState<string | null>(null);
   const [wait, setWait] = useState(0);
+  const lastSentAt = res.data?.verification[channel].lastSentAt;
+  useEffect(() => {
+    if (channel === "email" && !destination && res.data?.email) setDestination(res.data.email);
+  }, [channel, destination, res.data?.email]);
+  useEffect(() => {
+    if (!lastSentAt) return;
+    const remaining = Math.ceil((60_000 - (Date.now() - Date.parse(lastSentAt))) / 1000);
+    setWait(Math.max(0, remaining));
+  }, [lastSentAt]);
   useEffect(() => {
     if (!wait) return;
     const timer = setTimeout(() => setWait((value) => Math.max(0, value - 1)), 1000);
@@ -77,16 +85,21 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
   const cfg = d.provider[channel];
   const label = channel === "phone" ? t("verify.phoneTitle") : t("verify.emailTitle");
   const isVerified = c.status === "verified";
-  
+  const canSend = cfg.type !== "none" && (cfg.type !== "demo" || d.mockOtpEnabled);
+  const sendLabel = channel === "phone" ? "verify.sendMobileOtp" : "verify.sendEmailOtp";
+  const resendLabel = channel === "phone" ? "verify.resendMobileOtp" : "verify.resendEmailOtp";
+  const verifyLabel = channel === "phone" ? "verify.verifyMobileOtp" : "verify.verifyEmailOtp";
 
   const send = async () => {
     setError("");
     setBusy(true);
     try {
       const r = await getVerificationCode(channel, destination);
-      toast.success(t("verify.codeSentToast", { masked: r.masked }));
-      setWait(60);
-      if (r.demoCode) setLastCode(r.demoCode);
+      toast.success(r.mock
+        ? t("verify.devOtpCreatedToast", { masked: r.masked })
+        : t("verify.codeSentToast", { masked: r.masked }));
+      setWait(OTP_RESEND_MIN_MS / 1000);
+      res.refetch();
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -98,10 +111,10 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
     setError("");
     setBusy(true);
     try {
-      await verifyCode(channel, code);
-      toast.success(t("verify.verifiedToast"));
+      await verifyCode(channel, code, destination);
+      toast.success(t(channel === "phone" ? "verify.mobileVerified" : "verify.emailVerified"));
       setCode("");
-      setLastCode(null);
+      res.refetch();
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -128,8 +141,8 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
             />
           </Field>
           {error && <p role="alert" className="text-[12px] font-medium text-[#B42335]">{error}</p>}
-          <Button variant="secondary" size="sm" icon={RefreshCw} loading={busy} onClick={send} disabled={busy}>
-            {t("verify.resend")}
+          <Button variant="secondary" size="sm" icon={RefreshCw} loading={busy} onClick={send} disabled={busy || wait > 0 || !canSend || !destination.trim()}>
+            {wait > 0 ? t("verify.resendCountdown", { n: num(wait) }) : t(c.lastSentAt ? resendLabel : sendLabel)}
           </Button>
         </div>
       )}
@@ -138,16 +151,12 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
           <Field label={t("verify.enterCode")} htmlFor={`vc-code-${channel}`} required hint={t("verify.ttl", { n: num(OTP_TTL_MINUTES) })}>
             <Input id={`vc-code-${channel}`} inputMode="numeric" maxLength={OTP_LENGTH} value={code} onChange={(e) => setCode(e.target.value)} placeholder="000000" />
           </Field>
-          <Button size="sm" icon={ShieldCheck} loading={busy} onClick={submit} disabled={busy}>{t("verify.submitCode")}</Button>
-          {lastCode && (
-            <p className="rounded-sm bg-[#F6E7E5]/60 px-3 py-2 text-[12px] text-[#541B2B]">
-              {t("verify.codeShownHere", { code: lastCode })}
-            </p>
-          )}
+          <Button size="sm" icon={ShieldCheck} loading={busy} onClick={submit} disabled={busy || code.length !== OTP_LENGTH || !destination.trim()}>{t(verifyLabel)}</Button>
         </div>
       )}
-      {isVerified && <p className="text-[12px] text-[#26734D]">{t("verify.st.verified")}</p>}
+      {isVerified && <p className="text-[12px] text-[#26734D]">{t(channel === "phone" ? "verify.mobileVerified" : "verify.emailVerified")}</p>}
       {c.attempts > 0 && <p className="text-[11px] text-slate-400">{t("verify.attemptsLeft", { n: num(Math.max(OTP_MAX_ATTEMPTS - c.attempts, 0)) })}</p>}
+      {cfg.type === "demo" && d.mockOtpEnabled && <p className="text-[12px] text-slate-500">{t("verify.devOtpNotice")}</p>}
       {cfg.type === "none" && <p className="text-[12px] text-[#A45A16]">{t("verify.providerNotConfigured", { channel: t(`verify.providerChannel.${channel}`) })}</p>}
     </div>
   );
@@ -155,12 +164,10 @@ function ContactCheck({ channel }: { channel: "phone" | "email" }) {
 
 // thin wrappers so the OTP round trip is easy to invoke from the UI
 async function getVerificationCode(channel: "phone" | "email", destination: string) {
-  const { requestVerificationCode } = await import("@/lib/api");
   return requestVerificationCode(channel, destination);
 }
-async function verifyCode(channel: "phone" | "email", code: string) {
-  const { verifyContactCode } = await import("@/lib/api");
-  return verifyContactCode(channel, code);
+async function verifyCode(channel: "phone" | "email", code: string, destination: string) {
+  return verifyContactCode(channel, code, destination);
 }
 
 function BusinessCheck() {
@@ -195,9 +202,10 @@ function BusinessCheck() {
     };
     setBusy(true);
     try {
-      submitBusinessEvidence(payload);
+      await submitBusinessEvidence(payload);
       toast.success(t("verify.bizPending"));
-      navigate("/verification");
+      res.refetch();
+      evidence.refetch();
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -205,6 +213,8 @@ function BusinessCheck() {
     }
   };
 
+  if (res.error) return <ErrorState message={res.error} onRetry={res.refetch} />;
+  if (evidence.error) return <ErrorState message={evidence.error} onRetry={evidence.refetch} />;
   if (!v) return null;
   const b = v.business;
   if (b.status === "verified") return <p className="text-sm text-[#26734D]">{t("verify.trust.business")}</p>;
@@ -249,7 +259,7 @@ function BusinessCheck() {
       </Field>
       <p className="text-[12px] text-slate-500">{t("verify.bizUnregisteredNote")}</p>
       {error && <p role="alert" className="text-[12px] font-medium text-[#B42335]">{error}</p>}
-      <Button icon={Building2} loading={busy} onClick={submit} disabled={busy}>{t("verify.bizSubmit")}</Button>
+      <Button icon={Building2} loading={busy} onClick={submit} disabled={busy || b.status === "pending"}>{t("verify.bizSubmit")}</Button>
 
       {ev && !ev.reviewer && ev.evidence && (
         <Card className="p-4">
@@ -282,6 +292,7 @@ function IdentityCheck() {
   const [error, setError] = useState("");
   const d = res.data;
   const v = d?.verification;
+  if (res.error) return <ErrorState message={res.error} onRetry={res.refetch} />;
   if (!d || !v) return null;
 
   if (v.identity.status === "verified") {
@@ -311,8 +322,9 @@ function IdentityCheck() {
     setError("");
     setBusy(true);
     try {
-      submitIdentityVerification(form);
+      await submitIdentityVerification(form);
       toast.success(t("verify.identityPending"));
+      res.refetch();
     } catch (e) {
       setError(errMsg(e));
     } finally {
@@ -345,7 +357,7 @@ function IdentityCheck() {
           <p className="mt-2 text-[11px] text-slate-400">{t("verify.identityPrivacyNote")}</p>
         </Card>
       )}
-      {!v.identity.submission && status !== "rejected" && (
+      {status !== "pending" && (
         <div className="space-y-2">
           <Field label={t("verify.identityFullName")} htmlFor="vi-name" required>
             <Input id="vi-name" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} placeholder={t("verify.identityFullNamePh")} />
@@ -357,11 +369,8 @@ function IdentityCheck() {
             <Textarea id="vi-note" value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} placeholder={t("verify.identityNotePh")} className="min-h-[72px]" />
           </Field>
           {error && <p role="alert" className="text-[12px] font-medium text-[#B42335]">{error}</p>}
-          <Button icon={ShieldCheck} loading={busy} onClick={submit} disabled={busy}>{t("verify.identitySubmitTitle")}</Button>
+          <Button icon={ShieldCheck} loading={busy} onClick={submit} disabled={busy}>{t(status === "rejected" ? "verify.bizResubmit" : "verify.identitySubmitTitle")}</Button>
         </div>
-      )}
-      {status === "rejected" && (
-        <Button icon={RefreshCw} variant="soft" size="sm" onClick={() => { setForm({ fullName: form.fullName, idReference: form.idReference, note: form.note }); }}>{t("verify.bizResubmit")}</Button>
       )}
     </div>
   );
@@ -371,6 +380,7 @@ function ExchangesCheck() {
   const { t, tn } = useI18n();
   const res = useQuery(() => getVerification());
   const v = res.data?.verification;
+  if (res.error) return <ErrorState message={res.error} onRetry={res.refetch} />;
   if (!v) return null;
   return (
     <div className="text-[13px] text-slate-500">
@@ -384,14 +394,17 @@ function ProviderConfig() {
   const { t } = useI18n();
   const res = useQuery(() => getVerification());
   const [form, setForm] = useState({ phoneType: "demo", phoneEndpoint: "", phoneToken: "", emailType: "demo", emailEndpoint: "", emailToken: "" });
-  const d = res.data!;
-  const submit = (channel: "phone" | "email") => {
+  const d = res.data;
+  if (res.error) return <ErrorState message={res.error} onRetry={res.refetch} />;
+  if (!d) return null;
+  const submit = async (channel: "phone" | "email") => {
     const type = channel === "phone" ? form.phoneType : form.emailType;
     const endpoint = channel === "phone" ? form.phoneEndpoint : form.emailEndpoint;
     const token = channel === "phone" ? form.phoneToken : form.emailToken;
     try {
-      updateProviderConfig(channel, { type: type as "none" | "http" | "demo", endpoint, apiToken: token, label: t(`verify.providerChannel.${channel}`) });
+      await updateProviderConfig(channel, { type: type as "none" | "http" | "demo", endpoint, apiToken: token, label: t(`verify.providerChannel.${channel}`) });
       toast.success(t("verify.providerSave"));
+      res.refetch();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -433,12 +446,42 @@ function ProviderConfig() {
 
 function ModeratorPanel() {
   const { t } = useI18n();
-  const ev = useQuery(() => getBusinessEvidence());
-  const idEv = useQuery(() => (isReviewer() ? getIdentityEvidence() : null));
-  const queue = useQuery(() => (isReviewer() ? getListingReviewQueue() : []));
+  const access = useQuery(() => getVerification());
+  const reviewer = !!access.data?.reviewer;
+  const ev = useQuery(() => (reviewer ? getBusinessEvidence() : null), [reviewer]);
+  const idEv = useQuery(() => (reviewer ? getIdentityEvidence() : null), [reviewer]);
+  const queue = useQuery(() => (reviewer ? getListingReviewQueue() : []), [reviewer]);
+  const [rejectTarget, setRejectTarget] = useState<string | null>(null);
   const [reason, setReason] = useState("");
 
-  if (!isReviewer()) {
+  const beginReject = (target: string) => {
+    setRejectTarget(target);
+    setReason("");
+  };
+  const cancelReject = () => {
+    setRejectTarget(null);
+    setReason("");
+  };
+  const submitReject = async (target: string, action: () => Promise<unknown>, refresh: () => void, successKey: Key) => {
+    if (rejectTarget !== target) return;
+    if (reason.trim().length < 5) {
+      toast.error(t("verify.err.rejectReason"));
+      return;
+    }
+    try {
+      await action();
+      toast.success(t(successKey));
+      cancelReject();
+      refresh();
+      access.refetch();
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  };
+
+  if (access.error) return <ErrorState message={access.error} onRetry={access.refetch} />;
+  if (!access.data) return <Spinner />;
+  if (!reviewer) {
     return (
       <Card className="p-5">
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#8a3b44]">{t("verify.reviewerTitle")}</h2>
@@ -450,14 +493,14 @@ function ModeratorPanel() {
 
   return (
     <div className="space-y-8">
-      {idEv.data && idEv.data.reviewer && (
+      {reviewer && (
         <section>
           <SectionTitle title={t("verify.identityReviewQueue")} />
-          {!idEv.data.submissions?.length ? (
+          {idEv.error ? <ErrorState message={idEv.error} onRetry={idEv.refetch} /> : !idEv.data?.submissions?.length ? (
             <p className="py-6 text-[13px] text-slate-500">{t("verify.reviewQueueEmpty")}</p>
           ) : (
             <ul className="space-y-3">
-              {idEv.data.submissions.map((s) => (
+              {idEv.data?.reviewer && idEv.data.submissions.map((s) => (
                 <li key={s.userId} className="border-b border-[#E9DFDC] pb-4 last:border-0">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -467,11 +510,18 @@ function ModeratorPanel() {
                       <p className="text-[11px] text-slate-400">{t("verify.identitySubmitted")}</p>
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      <Button size="sm" icon={Check} onClick={() => { reviewIdentityVerification(s.userId, "approve"); toast.success(t("verify.identityApproved")); }}>{t("verify.approve")}</Button>
-                      <Button size="sm" variant="secondary" icon={Circle} onClick={() => { try { reviewIdentityVerification(s.userId, "reject", reason); toast.success(t("verify.bizRejected")); setReason(""); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.reject")}</Button>
+                      <Button size="sm" icon={Check} onClick={async () => { try { await reviewIdentityVerification(s.userId, "approve"); toast.success(t("verify.identityApproved")); idEv.refetch(); access.refetch(); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.approve")}</Button>
+                      {rejectTarget === `identity:${s.userId}` ? (
+                        <>
+                          <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="min-w-52 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />
+                          <Button size="sm" variant="danger" onClick={() => void submitReject(`identity:${s.userId}`, () => reviewIdentityVerification(s.userId, "reject", reason), idEv.refetch, "verify.bizRejected")}>{t("verify.reject")}</Button>
+                          <Button size="sm" variant="ghost" onClick={cancelReject}>{t("common.cancel")}</Button>
+                        </>
+                      ) : (
+                        <Button size="sm" variant="secondary" icon={Circle} onClick={() => beginReject(`identity:${s.userId}`)}>{t("verify.reject")}</Button>
+                      )}
                     </div>
                   </div>
-                  {reason && <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="mt-2 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />}
                 </li>
               ))}
             </ul>
@@ -479,14 +529,14 @@ function ModeratorPanel() {
         </section>
       )}
 
-      {ev.data && ev.data.reviewer && (
+      {reviewer && (
         <section>
           <SectionTitle title={t("verify.reviewerQueue")} />
-          {!ev.data.submissions?.length ? (
+          {ev.error ? <ErrorState message={ev.error} onRetry={ev.refetch} /> : !ev.data?.submissions?.length ? (
             <p className="py-6 text-[13px] text-slate-500">{t("verify.reviewQueueEmpty")}</p>
           ) : (
             <ul className="space-y-3">
-              {ev.data.submissions.map((s) => (
+              {ev.data?.reviewer && ev.data.submissions.map((s) => (
                 <li key={s.userId} className="border-b border-[#E9DFDC] pb-4 last:border-0">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -496,11 +546,18 @@ function ModeratorPanel() {
                       <p className="mt-1 text-[12px] text-slate-600">{s.evidence!.description}</p>
                     </div>
                     <div className="flex flex-col gap-1.5">
-                      <Button size="sm" icon={Check} onClick={() => { reviewBusinessEvidence(s.userId, "approve"); toast.success(t("verify.bizReviewed")); }}>{t("verify.approve")}</Button>
-                      <Button size="sm" variant="secondary" icon={Circle} onClick={() => { try { reviewBusinessEvidence(s.userId, "reject", reason); toast.success(t("verify.bizRejected")); setReason(""); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.reject")}</Button>
+                      <Button size="sm" icon={Check} onClick={async () => { try { await reviewBusinessEvidence(s.userId, "approve"); toast.success(t("verify.bizReviewed")); ev.refetch(); access.refetch(); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.approve")}</Button>
+                      {rejectTarget === `business:${s.userId}` ? (
+                        <>
+                          <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="min-w-52 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />
+                          <Button size="sm" variant="danger" onClick={() => void submitReject(`business:${s.userId}`, () => reviewBusinessEvidence(s.userId, "reject", reason), ev.refetch, "verify.bizRejected")}>{t("verify.reject")}</Button>
+                          <Button size="sm" variant="ghost" onClick={cancelReject}>{t("common.cancel")}</Button>
+                        </>
+                      ) : (
+                        <Button size="sm" variant="secondary" icon={Circle} onClick={() => beginReject(`business:${s.userId}`)}>{t("verify.reject")}</Button>
+                      )}
                     </div>
                   </div>
-                  {reason && <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="mt-2 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />}
                 </li>
               ))}
             </ul>
@@ -510,7 +567,7 @@ function ModeratorPanel() {
 
       <section>
         <SectionTitle title={t("verify.reviewerListings")} />
-        {!queue.data?.length ? (
+        {queue.error ? <ErrorState message={queue.error} onRetry={queue.refetch} /> : !queue.data?.length ? (
           <p className="py-6 text-[13px] text-slate-500">{t("verify.reviewQueueEmpty")}</p>
         ) : (
           <ul className="space-y-3">
@@ -525,11 +582,18 @@ function ModeratorPanel() {
                     <TrustBadges v={{ phoneVerified: false, emailVerified: false, businessVerified, identityVerified: false, completedExchanges: 0, trust: "new" }} spacing="gap-x-2" className="mt-1" />
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    <Button size="sm" icon={Check} onClick={() => { reviewListing(listing.id, "approve"); toast.success(t("verify.listingPublished")); }}>{t("verify.approve")}</Button>
-                    <Button size="sm" variant="secondary" icon={Circle} onClick={() => { try { reviewListing(listing.id, "reject", reason); toast.success(t("verify.listingRejected")); setReason(""); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.reject")}</Button>
+                    <Button size="sm" icon={Check} onClick={async () => { try { await reviewListing(listing.id, "approve"); toast.success(t("verify.listingPublished")); queue.refetch(); } catch (e) { toast.error(errMsg(e)); } }}>{t("verify.approve")}</Button>
+                    {rejectTarget === `listing:${listing.id}` ? (
+                      <>
+                        <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="min-w-52 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />
+                        <Button size="sm" variant="danger" onClick={() => void submitReject(`listing:${listing.id}`, () => reviewListing(listing.id, "reject", reason), queue.refetch, "verify.listingRejected")}>{t("verify.reject")}</Button>
+                        <Button size="sm" variant="ghost" onClick={cancelReject}>{t("common.cancel")}</Button>
+                      </>
+                    ) : (
+                      <Button size="sm" variant="secondary" icon={Circle} onClick={() => beginReject(`listing:${listing.id}`)}>{t("verify.reject")}</Button>
+                    )}
                   </div>
                 </div>
-                {reason && <Textarea aria-label={t("verify.rejectReason")} value={reason} onChange={(e) => setReason(e.target.value)} className="mt-2 min-h-[60px]" placeholder={t("verify.rejectReasonPh")} />}
               </li>
             ))}
           </ul>
@@ -546,8 +610,9 @@ export default function Verification() {
 
   const trust = useMemo(() => res.data?.verification.trust ?? "new", [res.data]);
   const eligibility = useMemo(() => res.data?.eligibility ?? { ok: false, required: [], missing: [] }, [res.data]);
-  if (res.error) return <ErrorState message={res.error} />;
-  const d = res.data!;
+  if (res.error) return <ErrorState message={res.error} onRetry={res.refetch} />;
+  if (!res.data) return <Spinner />;
+  const d = res.data;
   const v = d.verification;
 
   return (
@@ -639,10 +704,12 @@ export default function Verification() {
         </CheckRow>
       </section>
 
-      <section aria-label={t("verify.providerTitle")}>
-        <SectionTitle title={t("verify.providerTitle")} sub={t("verify.providerDesc")} />
-        <ProviderConfig />
-      </section>
+      {d.reviewer && (
+        <section aria-label={t("verify.providerTitle")}>
+          <SectionTitle title={t("verify.providerTitle")} sub={t("verify.providerDesc")} />
+          <ProviderConfig />
+        </section>
+      )}
 
       <section aria-label={t("verify.reviewerTitle")}>
         <SectionTitle title={t("verify.reviewerTitle")} sub={t("verify.reviewerDesc")} />
@@ -651,7 +718,7 @@ export default function Verification() {
 
       <section aria-label={t("verify.historyTitle")}>
         <SectionTitle title={t("verify.historyTitle")} />
-        {!events.data?.length ? (
+        {events.error ? <ErrorState message={events.error} onRetry={events.refetch} /> : !events.data?.length ? (
           <p className="py-6 text-[13px] text-slate-500">{t("verify.historyEmpty")}</p>
         ) : (
           <ul>

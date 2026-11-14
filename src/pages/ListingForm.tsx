@@ -1,9 +1,10 @@
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowLeft, CheckCircle2, Circle, ImagePlus, Loader2, Save, Send, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import {
-  createListing, getListing, getVerification, getPublishEligibility, updateListing, validateListing, type ListingInput,
+  createListing, getListing, updateListing, validateListing, type ListingInput,
 } from "@/lib/api";
+import { getPublishEligibility, getVerification } from "@/lib/verification-api";
 import { CATEGORIES, LIMITS, MODES, NEED_TYPES, OFFER_TYPES } from "@/lib/constants";
 import { useQuery } from "@/lib/hooks";
 import { L, useI18n, type Key } from "@/lib/i18n";
@@ -51,23 +52,24 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
   const base = isOffer ? "/offers" : "/needs";
   const isDraft = !existing || existing.status === "draft";
   const verQuery = useQuery(getVerification, []);
-  // Mirrors the server rule exactly: same function, same inputs.
-  const eligibility = useMemo(
-    () => getPublishEligibility(businessClaimed, f.category),
-    [businessClaimed, f.category, verQuery.data],
-  );
+  const eligibilityQuery = useQuery(() => getPublishEligibility(businessClaimed, f.category), [businessClaimed, f.category]);
+  const eligibility = eligibilityQuery.data ?? { ok: false, required: [], missing: [] };
 
-  const submit = (publish: boolean) => {
+  const submit = async (publish: boolean) => {
     setTouched(true);
     setServerError("");
     if (Object.keys(errors).length) {
       requestAnimationFrame(() => document.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
       return;
     }
+    if (publish && !eligibility.ok) {
+      setServerError(t("verify.err.publishBlocked", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") }));
+      return;
+    }
     setBusy(publish ? "publish" : "draft");
     try {
       const withClaim = { ...input, businessClaimed };
-      const saved = existing ? updateListing(existing.id, withClaim, publish) : createListing(kind, withClaim, publish);
+      const saved = await (existing ? updateListing(existing.id, withClaim, publish) : createListing(kind, withClaim, publish));
       const pending = saved.status === "pending_review";
       toast.success(
         pending
@@ -161,7 +163,7 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
         </div>
       </Card>
 
-      <form className="grid gap-6 lg:grid-cols-[1fr_300px]" onSubmit={(e) => (e.preventDefault(), submit(true))} noValidate>
+      <form className="grid gap-6 lg:grid-cols-[1fr_300px]" onSubmit={(e) => { e.preventDefault(); void submit(true); }} noValidate>
         <div className="min-w-0 space-y-5">
           <Section n={1} title={t("lf.s1")}>
             <Field label={k("lf.offerTitle", "lf.needTitle")} htmlFor="lf-title" required error={err("title")} count={f.title.trim().length} max={LIMITS.title}>
@@ -270,7 +272,7 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
                 </li>
               ))}
             </ul>
-            {serverError && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{serverError}</p>}
+            {(serverError || eligibilityQuery.error) && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{serverError || eligibilityQuery.error}</p>}
             {touched && Object.keys(errors).length > 0 && <p role="alert" className="mt-3 text-xs text-red-600">{t("lf.fixFields")}</p>}
             <div className="mt-4 space-y-2">
               <Button
@@ -278,12 +280,12 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
                 className="w-full"
                 icon={Send}
                 loading={busy === "publish"}
-                disabled={!!busy || imgBusy > 0 || !eligibility.ok}
-                title={eligibility.ok ? undefined : t("verify.err.publishBlocked", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") })}
+                disabled={!!busy || imgBusy > 0 || !eligibilityQuery.data?.ok}
+                title={eligibilityQuery.error ?? (eligibility.ok ? undefined : t("verify.err.publishBlocked", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") }))}
               >
                 {isDraft ? k("lf.publishOffer", "lf.publishNeed") : t("lf.saveChanges")}
               </Button>
-              {isDraft && <Button type="button" variant="secondary" className="w-full" icon={Save} loading={busy === "draft"} disabled={!!busy || imgBusy > 0} onClick={() => submit(false)}>{t("lf.saveDraft")}</Button>}
+              {isDraft && <Button type="button" variant="secondary" className="w-full" icon={Save} loading={busy === "draft"} disabled={!!busy || imgBusy > 0}               onClick={() => void submit(false)}>{t("lf.saveDraft")}</Button>}
               <Button type="button" variant="ghost" className="w-full" onClick={() => navigate(base)} disabled={!!busy}>{t("common.cancel")}</Button>
             </div>
             {isDraft && <p className="mt-3 text-[11px] text-slate-400">{k("lf.draftNoteOffer", "lf.draftNoteNeed")}</p>}

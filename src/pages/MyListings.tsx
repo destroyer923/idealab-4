@@ -26,14 +26,15 @@ const ACTION: Record<string, Key> = {
 };
 const CONFIRMABLE = new Set(["offer:inactive", "need:paused", "need:fulfilled", "offer:pending_review", "need:pending_review"]);
 
-function StatusActions({ l, onDelete }: { l: Listing; onDelete: () => void }) {
+function StatusActions({ l, onDelete, onChanged }: { l: Listing; onDelete: () => void; onChanged: () => void }) {
   const { t } = useI18n();
   const [pending, setPending] = useState<string | null>(null);
-  const change = (to: string) => {
+  const change = async (to: string) => {
     if (to === "rejected") return;
     try {
-      setListingStatus(l.id, to);
+      await setListingStatus(l.id, to);
       toast.success(t("ml.statusUpdated", { status: t(L.status(l.kind, to)) }));
+      onChanged();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -55,7 +56,7 @@ function StatusActions({ l, onDelete }: { l: Listing; onDelete: () => void }) {
       })}
       <Button size="sm" variant="ghost" icon={Trash2} className="text-red-600 hover:bg-red-50 hover:text-red-700" onClick={onDelete} aria-label={t("ml.deleteAria", { title: l.title })}>{t("common.delete")}</Button>
       {l.status === "rejected" && (
-        <Button size="sm" variant="soft" icon={RefreshCw} onClick={() => resubmitListing(l.id)}>{t("ml.resubmit")}</Button>
+        <Button size="sm" variant="soft" icon={RefreshCw} onClick={async () => { try { await resubmitListing(l.id); onChanged(); } catch (e) { toast.error(errMsg(e)); } }}>{t("ml.resubmit")}</Button>
       )}
       {pending && (
         <ConfirmDialog open onClose={() => setPending(null)} onConfirm={() => change(pending)} title={t(`ml.c.${ck}.title` as Key)} body={t(`ml.c.${ck}.body` as Key)} confirmLabel={t(`ml.c.${ck}.label` as Key)} />
@@ -68,8 +69,8 @@ export default function MyListings({ kind }: { kind: ListingKind }) {
   const { t, tn, num, date } = useI18n();
   const isOffer = kind === "offer";
   const k = (offer: Key, need: Key) => t(isOffer ? offer : need);
-  const res = useQuery(() => {
-    const ls = getMyListings(kind);
+  const res = useQuery(async () => {
+    const ls = await getMyListings(kind);
     const db = read();
     return ls.map((l) => ({ l, responses: responseCount(db, l.id) }));
   }, [kind]);
@@ -157,7 +158,7 @@ export default function MyListings({ kind }: { kind: ListingKind }) {
                         {responses > 0 && <span className="inline-flex items-center gap-1"><Inbox className="h-3 w-3" />{tn("count.proposals", responses)}</span>}
                       </div>
                       {!isOffer && l.exchangePref && <p className="mt-2 line-clamp-1 break-words text-xs text-slate-500"><b>{t("lf.canOffer")}</b> {l.exchangePref}</p>}
-                      <StatusActions l={l} onDelete={() => setDel(l)} />
+                      <StatusActions l={l} onDelete={() => setDel(l)} onChanged={res.refetch} />
                     </>
                   }
                 />
@@ -174,10 +175,11 @@ export default function MyListings({ kind }: { kind: ListingKind }) {
           title={t("ml.deleteTitle", { title: del.title })}
           body={t("ml.deleteBody")}
           confirmLabel={t("common.delete")}
-          onConfirm={() => {
+          onConfirm={async () => {
             try {
-              const r = deleteListing(del.id);
+              const r = await deleteListing(del.id);
               toast.success(r === "archived" ? t("ml.archivedToast") : t("ml.deletedToast"));
+              res.refetch();
             } catch (e) {
               toast.error(errMsg(e));
             }

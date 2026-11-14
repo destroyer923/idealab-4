@@ -86,9 +86,9 @@ export default function Settings() {
                 type="checkbox"
                 className="h-4 w-4 accent-emerald-600"
                 checked={prefs[k]}
-                onChange={(e) => {
+                onChange={async (e) => {
                   try {
-                    updatePrefs({ ...prefs, [k]: e.target.checked });
+                    await updatePrefs({ ...prefs, [k]: e.target.checked });
                     toast.success(t("st.prefSaved"));
                   } catch (er) {
                     toast.error(errMsg(er));

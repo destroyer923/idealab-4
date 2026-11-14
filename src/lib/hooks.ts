@@ -2,20 +2,40 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { ApiError, getVersion, refreshStore, subscribe } from "./db";
 import { hasKey, translate, useLang, type Key } from "./i18n";
 
-/** Re-runs a synchronous data query whenever the store changes (in this tab or any other). */
-export function useQuery<T>(fn: () => T, deps: unknown[] = []) {
+/** Re-runs a data query whenever the store changes (in this tab or any other). */
+export function useQuery<T>(fn: () => T | Promise<T>, deps: unknown[] = []) {
   const v = useSyncExternalStore(subscribe, getVersion, getVersion);
   const [retry, setRetry] = useState(0);
   const lang = useLang(); // re-translate error messages when the language changes
-  const result = useMemo(() => {
+  const [result, setResult] = useState<{ data?: T; error: string | null }>({ data: undefined, error: null });
+
+  useEffect(() => {
+    let active = true;
     try {
-      return { data: fn(), error: null };
+      const value = fn();
+      const isPromise = value !== null && typeof value === "object" && "then" in value && typeof (value as Promise<T>).then === "function";
+      if (isPromise) {
+        setResult({ data: undefined, error: null });
+        (value as Promise<T>)
+          .then((data) => {
+            if (active) setResult({ data, error: null });
+          })
+          .catch((e: unknown) => {
+            if (!active) return;
+            const key = e instanceof ApiError && hasKey(e.message) ? (e.message as Key) : "err.generic";
+            setResult({ data: undefined, error: translate(key, e instanceof ApiError ? e.vars : undefined, lang) });
+          });
+        return () => { active = false; };
+      }
+      setResult({ data: value as T, error: null });
     } catch (e) {
       const key = e instanceof ApiError && hasKey(e.message) ? (e.message as Key) : "err.generic";
-      return { data: undefined, error: translate(key, e instanceof ApiError ? e.vars : undefined, lang) };
+      setResult({ data: undefined, error: translate(key, e instanceof ApiError ? e.vars : undefined, lang) });
     }
+    return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [v, lang, retry, ...deps]);
+
   const refetch = useCallback(() => {
     refreshStore(true);
     setRetry((n) => n + 1);

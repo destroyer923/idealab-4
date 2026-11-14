@@ -127,9 +127,8 @@ export function MatchPersonCard({ c, member, onPropose }: { c: MatchCandidate; m
 export default function Dashboard() {
   const { t, ago, greeting } = useI18n();
   const me = useQuery(() => getMe());
-  const stats = useQuery(() => {
-    const offers = getMyListings("offer");
-    const needs = getMyListings("need");
+  const stats = useQuery(async () => {
+    const [offers, needs] = await Promise.all([getMyListings("offer"), getMyListings("need")]);
     const ex = getMyExchanges();
     return {
       activeOffers: offers.filter((o) => o.status === "active").length,
@@ -140,8 +139,8 @@ export default function Dashboard() {
   });
   const matches = useMatches();
   const activity = useQuery(() => getActivity(6));
-  const community = useQuery(() => {
-    const all = getPublicListings().sort((a, b) => b.listing.createdAt.localeCompare(a.listing.createdAt));
+  const community = useQuery(async () => {
+    const all = (await getPublicListings()).sort((a, b) => b.listing.createdAt.localeCompare(a.listing.createdAt));
     return {
       offers: all.filter((x) => x.listing.kind === "offer").slice(0, 3),
       needs: all.filter((x) => x.listing.kind === "need").slice(0, 3),
@@ -191,7 +190,9 @@ export default function Dashboard() {
       </section>
 
       {/* Can Offer / Needs */}
-      {community.data && (
+      {community.error ? (
+        <ErrorState message={community.error} onRetry={community.refetch} />
+      ) : community.data && (
         <div className="grid gap-x-12 gap-y-14 lg:grid-cols-2">
           {([
             { key: "offers", title: t("dash.offersTitle"), sub: t("dash.offersSub"), items: community.data.offers, empty: t("dash.noOffers"), post: "/offers/new", postLabel: t("action.postOffer") },

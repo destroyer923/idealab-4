@@ -2,9 +2,11 @@ import { useMemo, useState } from "react";
 import { Check, Circle, Inbox, ShieldCheck, ShieldAlert, UserCog, X } from "lucide-react";
 import { cn } from "@/utils/cn";
 import {
-  getAdminOverview, getAdminUsers, getAdminReviewQueue, getAdminReviewHistory,
-  reviewBusinessEvidence, reviewIdentityVerification, isAdmin, setAccountStatus,
+  getAdminOverview, getAdminUsers, isAdmin, setAccountStatus,
 } from "@/lib/api";
+import {
+  getAdminReviewQueue, getAdminReviewHistory, reviewBusinessEvidence, reviewIdentityVerification,
+} from "@/lib/verification-api";
 import { L, useI18n, type Key } from "@/lib/i18n";
 import { useDebounced, useQuery } from "@/lib/hooks";
 import { useI18n as useI18nT } from "@/lib/i18n";
@@ -31,27 +33,29 @@ type Submission = {
 type FilterKey = "pending" | "approved" | "rejected";
 type TypeKey = "all" | "business" | "identity";
 
-function SubmissionRow({ s }: { s: Submission }) {
+function SubmissionRow({ s, onReviewed }: { s: Submission; onReviewed: () => void }) {
   const { t, ago } = useI18nT();
   const [reason, setReason] = useState("");
   const [open, setOpen] = useState(false);
 
-  const approve = () => {
+  const approve = async () => {
     try {
-      if (s.type === "business") reviewBusinessEvidence(s.userId, "approve");
-      else reviewIdentityVerification(s.userId, "approve");
+      if (s.type === "business") await reviewBusinessEvidence(s.userId, "approve");
+      else await reviewIdentityVerification(s.userId, "approve");
       toast.success(t("verify.approve"));
+      onReviewed();
     } catch (e) {
       toast.error(errMsg(e));
     }
   };
-  const reject = () => {
+  const reject = async () => {
     try {
-      if (s.type === "business") reviewBusinessEvidence(s.userId, "reject", reason);
-      else reviewIdentityVerification(s.userId, "reject", reason);
+      if (s.type === "business") await reviewBusinessEvidence(s.userId, "reject", reason);
+      else await reviewIdentityVerification(s.userId, "reject", reason);
       toast.success(t("verify.reject"));
       setReason("");
       setOpen(false);
+      onReviewed();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -130,17 +134,20 @@ function SubmissionRow({ s }: { s: Submission }) {
   );
 }
 
-function UserRow({ u }: { u: ReturnType<typeof getAdminUsers>["users"][0] }) {
+type AdminUser = Awaited<ReturnType<typeof getAdminUsers>>["users"][number];
+
+function UserRow({ u, onChanged }: { u: AdminUser; onChanged: () => void }) {
   const { t, date } = useI18nT();
   const [suspendOpen, setSuspendOpen] = useState(false);
   const [suspendReason, setSuspendReason] = useState("");
 
-  const doSuspend = () => {
+  const doSuspend = async () => {
     try {
-      setAccountStatus(u.userId, "suspended", suspendReason);
+      await setAccountStatus(u.userId, "suspended", suspendReason);
       toast.success(t("admin.user.status.suspended"));
       setSuspendOpen(false);
       setSuspendReason("");
+      onChanged();
     } catch (e) {
       toast.error(errMsg(e));
     }
@@ -179,7 +186,7 @@ function UserRow({ u }: { u: ReturnType<typeof getAdminUsers>["users"][0] }) {
       )}
       {u.role !== "admin" && u.status === "suspended" && (
         <div className="mt-2">
-          <Button size="sm" variant="ghost" icon={Check} onClick={() => { try { setAccountStatus(u.userId, "active"); toast.success(t("admin.user.status.active")); } catch (e) { toast.error(errMsg(e)); } }}>{t("admin.user.activate")}</Button>
+          <Button size="sm" variant="ghost" icon={Check} onClick={async () => { try { await setAccountStatus(u.userId, "active"); toast.success(t("admin.user.status.active")); onChanged(); } catch (e) { toast.error(errMsg(e)); } }}>{t("admin.user.activate")}</Button>
         </div>
       )}
       {suspendOpen && (
@@ -297,7 +304,7 @@ export default function Admin() {
             <EmptyState icon={Inbox} title={t("admin.noPendingTitle")} body={t("admin.noPendingBody")} />
           ) : (
             <ul className="space-y-4">
-              {filtered.map((s) => <li key={s.userId + s.type}><SubmissionRow s={s} /></li>)}
+              {filtered.map((s) => <li key={s.userId + s.type}><SubmissionRow s={s} onReviewed={() => { queue.refetch(); history.refetch(); }} /></li>)}
             </ul>
           )}
         </div>
@@ -312,7 +319,7 @@ export default function Admin() {
             <EmptyState icon={UserCog} title={t("admin.noPendingTitle")} body={t("admin.user.search")} />
           ) : (
             <ul className="space-y-3">
-              {users.data.users.map((u) => <li key={u.userId}><UserRow u={u} /></li>)}
+              {users.data.users.map((u) => <li key={u.userId}><UserRow u={u} onChanged={() => users.refetch()} /></li>)}
             </ul>
           )}
         </div>

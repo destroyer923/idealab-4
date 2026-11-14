@@ -9,7 +9,8 @@ import { L, useI18n, useT } from "@/lib/i18n";
 import { processImage } from "@/lib/format";
 import { Link, navigate } from "@/lib/router";
 import type { Skill } from "@/lib/types";
-import { Avatar, Button, Card, Chip, Field, Input, Select, Textarea, errMsg, focusRing, toast } from "@/components/ui";
+import { Avatar, Button, Card, Chip, ErrorState, Field, Input, Select, Spinner, Textarea, errMsg, focusRing, toast } from "@/components/ui";
+import { useQuery } from "@/lib/hooks";
 
 const csv = (a: string[]) => a.join(", ");
 const parse = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
@@ -49,10 +50,9 @@ function ImagePick({ label, onPick, children, maxDim, className }: { label: stri
   );
 }
 
-export default function ProfileEdit() {
+function ProfileEditForm({ profile: p0 }: { profile: Awaited<ReturnType<typeof getMe>>["profile"] }) {
   const { t, num } = useI18n();
-  const [p0] = useState(() => getMe().profile);
-  const [f, setF] = useState<ProfileInput>({ ...p0 });
+  const [f, setF] = useState<ProfileInput>(() => ({ ...p0 }));
   const [roles, setRoles] = useState(csv(p0.roles));
   const [langs, setLangs] = useState(csv(p0.languages));
   const [interests, setInterests] = useState(csv(p0.interests));
@@ -61,9 +61,12 @@ export default function ProfileEdit() {
   const [touched, setTouched] = useState(false);
   const set = <K extends keyof ProfileInput>(k: K, v: ProfileInput[K]) => setF((x) => ({ ...x, [k]: v }));
   const du = useDebounced(f.username.toLowerCase(), 300);
-  const usernameOk = du === p0.username || isUsernameAvailable(du);
+  const usernameAvailability = useQuery(() => du === p0.username ? true : isUsernameAvailable(du), [du]);
+  const usernameOk = du === p0.username || usernameAvailability.data === true;
   const nameErr = touched && f.fullName.trim().length < 2 ? t("err.fullNameRequired") : undefined;
-  const userErr = !/^[a-z0-9_]{3,24}$/.test(f.username) ? t("err.usernameFormat") : !usernameOk ? t("err.usernameTaken") : undefined;
+  const userErr = !/^[a-z0-9_]{3,24}$/.test(f.username)
+    ? t("err.usernameFormat")
+    : usernameAvailability.error ?? (usernameAvailability.data === false ? t("err.usernameTaken") : undefined);
   const bioErr = f.bio.length > LIMITS.bio ? t("err.maxLength", { max: num(LIMITS.bio) }) : undefined;
 
   const setSkill = (i: number, patch: Partial<Skill>) => set("skills", f.skills.map((s, j) => (j === i ? { ...s, ...patch } : s)));
@@ -75,14 +78,14 @@ export default function ProfileEdit() {
       <form
         className="space-y-5"
         noValidate
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
           setTouched(true);
           setError("");
-          if (f.fullName.trim().length < 2 || userErr || bioErr) return;
+          if (f.fullName.trim().length < 2 || du !== f.username.toLowerCase() || !usernameOk || userErr || bioErr) return;
           setBusy(true);
           try {
-            updateProfile({ ...f, roles: parse(roles), languages: parse(langs), interests: parse(interests) });
+            await updateProfile({ ...f, roles: parse(roles), languages: parse(langs), interests: parse(interests) });
             toast.success(t("pe.savedToast"));
             navigate("/profile");
           } catch (er) {
@@ -204,4 +207,11 @@ export default function ProfileEdit() {
       </form>
     </div>
   );
+}
+
+export default function ProfileEdit() {
+  const profile = useQuery(() => getMe());
+  if (profile.error) return <ErrorState message={profile.error} onRetry={profile.refetch} />;
+  if (!profile.data) return <Spinner />;
+  return <ProfileEditForm profile={profile.data.profile} />;
 }

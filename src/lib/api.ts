@@ -1,5 +1,4 @@
 import { ApiError, exclusiveWrite, getSessionUserId, now, read, setSessionUserId, transact, uid } from "./db";
-import { DESIGNATED_ADMIN, matchesDesignatedAdmin, safeEqualHex } from "./admin";
 import {
   BUSINESS_TYPES, generateCode, hashOtp, maskEmail, maskPhone, sendOtp, verifyCode,
   OTP_MAX_ATTEMPTS, OTP_MAX_RESENDS_PER_HOUR, OTP_RESEND_MIN_MS, OTP_TTL_MINUTES,
@@ -7,6 +6,7 @@ import {
 } from "./verify";
 import { CATEGORIES, LIMITS, NEED_TYPES, OFFER_TYPES } from "./constants";
 import { getLang, isLang, setVisitorLang, translate, visitorLang } from "./i18n";
+import { isAdminRole } from "./roles";
 import type { Key } from "@/locales/en";
 import type {
   CheckStatus, BusinessEvidence, IdentityProviderConfig, ProviderConfig, TrustTier, Verification, VerifyEventType,
@@ -15,7 +15,7 @@ import type {
 import type { PublicVerification } from "./types";
 import type {
   ActivityEvent, AppNotification, CommitmentProgress, Connection, Conversation, ContextType, DB, Delivery, EventType, Exchange,
-  ID, Listing, ListingKind, Message, Milestone, MilestoneStatus, Profile, PublicMember, Review, SavedListing, Skill, Vars,
+  ID, Listing, ListingKind, Message, Milestone, MilestoneStatus, Profile, PublicMember, Review, SavedListing, Skill, User, UserRole, Vars,
 } from "./types";
 
 /* ------------------------------------------------------------------ */
@@ -53,7 +53,6 @@ export function memberOf(db: DB, userId: ID): PublicMember {
       fullName: translate("common.formerMember"),
       username: "",
       occupation: "",
-      verification: { phoneVerified: false, emailVerified: false, businessVerified: false, identityVerified: false, completedExchanges: 0, trust: "new" },
     };
   return {
     userId,
@@ -62,7 +61,6 @@ export function memberOf(db: DB, userId: ID): PublicMember {
     occupation: p.occupation,
     avatar: p.avatar,
     location: p.visibility.location && p.location ? p.location : undefined,
-    verification: getPublicVerification(userId),
   };
 }
 
@@ -134,6 +132,113 @@ export async function hashPassword(password: string, salt: string) {
 
 const USERNAME_RE = /^[a-z0-9_]{3,24}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const API_BASE_URL =
+  (import.meta as ImportMeta & { env?: { VITE_API_URL?: string } }).env?.VITE_API_URL?.replace(/\/+$/, "") ||
+  "http://localhost:5000";
+const AUTH_TOKEN_KEY = "skillswap-rural.auth-token.v1";
+
+type AuthResponse = {
+  token: string;
+  user: {
+    id: ID;
+    email: string;
+    role: UserRole;
+    status: "active" | "suspended";
+    profile: Omit<Profile, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string };
+  };
+};
+
+async function authenticate(
+  endpoint: "register" | "login",
+  input: Record<string, string>,
+): Promise<AuthResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/auth/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  } catch {
+    throw new ApiError("err.generic", "network_error");
+  }
+
+  let payload: AuthResponse | { code?: string };
+  try {
+    const decoded: unknown = await response.json();
+    if (typeof decoded !== "object" || decoded === null) {
+      throw new Error("Invalid authentication response");
+    }
+    payload = decoded as AuthResponse | { code?: string };
+  } catch {
+    throw new ApiError("err.generic", "invalid_server_response");
+  }
+  if (!response.ok) {
+    const code = "code" in payload ? payload.code : undefined;
+    const message =
+      code === "invalid_email" ? "err.invalidEmail"
+        : code === "invalid_full_name" ? "err.fullNameRequired"
+          : code === "invalid_username" ? "err.usernameFormat"
+            : code === "invalid_password" ? "err.passwordLength"
+              : code === "account_exists" ? "err.emailTaken"
+                : code === "invalid_credentials" ? "err.badCredentials"
+                  : code === "account_suspended" ? "err.accountSuspended"
+                    : "err.generic";
+    throw new ApiError(message, response.status === 401 ? "unauthenticated" : "server_error");
+  }
+  if (!("token" in payload) || !payload.token || !payload.user?.id || !payload.user.profile) {
+    throw new ApiError("err.generic", "invalid_server_response");
+  }
+  return payload;
+}
+
+function cacheAuthenticatedUser(user: AuthResponse["user"]) {
+  const timestamp = now();
+  const profile: Profile = {
+    userId: user.id,
+    fullName: user.profile.fullName,
+    username: user.profile.username,
+    bio: user.profile.bio ?? "",
+    occupation: user.profile.occupation ?? "",
+    roles: user.profile.roles ?? [],
+    location: user.profile.location ?? "",
+    languages: user.profile.languages ?? [],
+    skills: user.profile.skills ?? [],
+    interests: user.profile.interests ?? [],
+    collabTypes: user.profile.collabTypes ?? [],
+    availability: user.profile.availability ?? "",
+    avatar: user.profile.avatar,
+    cover: user.profile.cover,
+    portfolio: user.profile.portfolio ?? [],
+    visibility: user.profile.visibility ?? { bio: true, location: false, skills: true, portfolio: true },
+    prefs: user.profile.prefs ?? { messages: true, exchanges: true, reviews: true },
+    qrToken: user.profile.qrToken,
+    language: isLang(user.profile.language) ? user.profile.language : "en",
+    createdAt: user.profile.createdAt ?? timestamp,
+    updatedAt: user.profile.updatedAt ?? timestamp,
+  };
+
+  transact((db) => {
+    const localUser: User = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      passwordHash: "",
+      salt: "",
+      createdAt: timestamp,
+    };
+    const userIndex = db.users.findIndex((entry) => entry.id === user.id);
+    if (userIndex === -1) db.users.push(localUser);
+    else db.users[userIndex] = { ...db.users[userIndex], ...localUser };
+
+    const profileIndex = db.profiles.findIndex((entry) => entry.userId === user.id);
+    if (profileIndex === -1) db.profiles.push(profile);
+    else db.profiles[profileIndex] = { ...db.profiles[profileIndex], ...profile };
+  });
+  setSessionUserId(user.id);
+  setVisitorLang(profile.language ?? "en");
+}
 
 export async function register(input: { email: string; password: string; fullName: string; username: string; language?: string }) {
   const email = clean(input.email, 120).toLowerCase();
@@ -144,123 +249,34 @@ export async function register(input: { email: string; password: string; fullNam
   lengthCheck(fullName, 80);
   need(USERNAME_RE.test(username), "err.usernameFormat");
   need(input.password.length >= 8, "err.passwordLength");
-  const salt = uid();
-  const passwordHash = await hashPassword(input.password, salt);
-  const id = transact((db) => {
-    need(!db.users.some((u) => u.email === email), "err.emailTaken", "conflict");
-    need(!db.profiles.some((p) => p.username === username), "err.usernameTaken", "conflict");
-    const id = uid();
-    const t = now();
-    db.users.push({ id, email, passwordHash, salt, role: "member", status: "active", createdAt: t });
-    db.profiles.push({
-      userId: id, fullName, username, bio: "", occupation: "", roles: [], location: "", languages: [], skills: [], interests: [],
-      collabTypes: [], availability: "", portfolio: [], visibility: { bio: true, location: false, skills: true, portfolio: true },
-      prefs: { messages: true, exchanges: true, reviews: true }, qrToken: makeQrToken(), language: isLang(input.language) ? input.language : visitorLang(), createdAt: t, updatedAt: t,
-    });
-    return id;
+  const result = await authenticate("register", {
+    email,
+    password: input.password,
+    fullName,
+    username,
+    language: isLang(input.language) ? input.language : visitorLang(),
   });
-  setSessionUserId(id);
-}
-
-function syncAccountLanguage(userId: ID) {
-  const saved = read().profiles.find((x) => x.userId === userId)?.language;
-  if (isLang(saved)) setVisitorLang(saved);
-  else
-    transact((db) => {
-      const p = db.profiles.find((x) => x.userId === userId);
-      if (p && !isLang(p.language)) p.language = visitorLang();
-    });
-}
-
-/**
- * Authenticates or repairs the single designated administrator account ONLY when both
- * the normalized email and PBKDF2-SHA256 password digest match DESIGNATED_ADMIN.
- * Existing user IDs, profile data, and related records are preserved.
- */
-async function authenticateOrRepairDesignatedAdmin(email: string, password: string): Promise<ID | null> {
-  if (!(await matchesDesignatedAdmin(email, password, hashPassword))) return null;
-  return transact((db) => {
-    const existing = db.users.find((u) => u.email === DESIGNATED_ADMIN.email);
-    const t = now();
-    if (existing) {
-      existing.salt = DESIGNATED_ADMIN.salt;
-      existing.passwordHash = DESIGNATED_ADMIN.passwordHash;
-      existing.role = "admin";
-      existing.status = "active";
-      const profile = db.profiles.find((p) => p.userId === existing.id);
-      if (!profile) {
-        const desired = DESIGNATED_ADMIN.username;
-        const username = db.profiles.some((p) => p.username === desired) ? `${desired}_admin` : desired;
-        db.profiles.push({
-          userId: existing.id, fullName: DESIGNATED_ADMIN.fullName, username, bio: "", occupation: "", roles: [], location: "", languages: [], skills: [], interests: [],
-          collabTypes: [], availability: "", portfolio: [], visibility: { bio: true, location: false, skills: true, portfolio: true },
-          prefs: { messages: true, exchanges: true, reviews: true }, qrToken: makeQrToken(), language: visitorLang(), createdAt: t, updatedAt: t,
-        });
-      } else if (!profile.qrToken) {
-        profile.qrToken = makeQrToken();
-      }
-      return existing.id;
-    }
-    const id = uid();
-    const desired = DESIGNATED_ADMIN.username;
-    const username = db.profiles.some((p) => p.username === desired) ? `${desired}_admin` : desired;
-    db.users.push({
-      id, email: DESIGNATED_ADMIN.email, passwordHash: DESIGNATED_ADMIN.passwordHash, salt: DESIGNATED_ADMIN.salt,
-      role: "admin", status: "active", createdAt: t,
-    });
-    db.profiles.push({
-      userId: id, fullName: DESIGNATED_ADMIN.fullName, username, bio: "", occupation: "", roles: [], location: "", languages: [], skills: [], interests: [],
-      collabTypes: [], availability: "", portfolio: [], visibility: { bio: true, location: false, skills: true, portfolio: true },
-      prefs: { messages: true, exchanges: true, reviews: true }, qrToken: makeQrToken(), language: visitorLang(), createdAt: t, updatedAt: t,
-    });
-    return id;
-  });
+  sessionStorage.setItem(AUTH_TOKEN_KEY, result.token);
+  cacheAuthenticatedUser(result.user);
 }
 
 export async function login(emailRaw: string, password: string) {
   const email = clean(emailRaw, 120).toLowerCase();
-  const user = read().users.find((u) => u.email === email);
-  // Hash even when user is unknown to keep timing similar.
-  const hash = await hashPassword(password, user?.salt ?? "x");
-  if (user && safeEqualHex(hash, user.passwordHash)) {
-    if (user.status === "suspended") throw new ApiError("err.accountSuspended", "forbidden");
-    if (await matchesDesignatedAdmin(email, password, hashPassword)) {
-      transact((db) => {
-        const u = db.users.find((x) => x.id === user.id);
-        if (u) u.role = "admin";
-      });
-    }
-    setSessionUserId(user.id);
-    syncAccountLanguage(user.id);
-    return;
-  }
-  const repairedId = await authenticateOrRepairDesignatedAdmin(email, password);
-  if (repairedId) {
-    setSessionUserId(repairedId);
-    syncAccountLanguage(repairedId);
-    return;
-  }
-  throw new ApiError("err.badCredentials", "unauthenticated");
+  const result = await authenticate("login", { email, password });
+  sessionStorage.setItem(AUTH_TOKEN_KEY, result.token);
+  cacheAuthenticatedUser(result.user);
 }
 
 export async function adminLogin(emailRaw: string, password: string) {
   const email = clean(emailRaw, 120).toLowerCase();
-  const repairedId = await authenticateOrRepairDesignatedAdmin(email, password);
-  if (repairedId) {
-    setSessionUserId(repairedId);
-    syncAccountLanguage(repairedId);
-    return;
-  }
-  const user = read().users.find((u) => u.email === email);
-  const hash = await hashPassword(password, user?.salt ?? "x");
-  if (!user || !safeEqualHex(hash, user.passwordHash)) throw new ApiError("err.badCredentials", "unauthenticated");
-  if (user.status === "suspended") throw new ApiError("err.accountSuspended", "forbidden");
-  if (user.role !== "admin") throw new ApiError("auth.notAdmin", "forbidden");
-  setSessionUserId(user.id);
-  syncAccountLanguage(user.id);
+  const result = await authenticate("login", { email, password });
+  if (!isAdminRole(result.user.role)) throw new ApiError("auth.notAdmin", "forbidden");
+  sessionStorage.setItem(AUTH_TOKEN_KEY, result.token);
+  cacheAuthenticatedUser(result.user);
 }
 
 export function logout() {
+  sessionStorage.removeItem(AUTH_TOKEN_KEY);
   setSessionUserId(null);
 }
 
@@ -282,24 +298,70 @@ export async function changePassword(current: string, next: string) {
 /* profiles                                                            */
 /* ------------------------------------------------------------------ */
 
-export function getMe(): { profile: Profile; email: string } {
-  const db = read();
-  const me = sessionUser(db);
-  const profile = db.profiles.find((p) => p.userId === me);
-  if (!profile) throw new ApiError("err.profileNotFound", "not_found");
-  return { profile, email: db.users.find((u) => u.id === me)!.email };
+export async function getMe(): Promise<{ profile: Profile; email: string }> {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+
+  const response = await fetch(`${API_BASE_URL}/api/profile/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = payload && typeof payload === "object" && "code" in payload ? String((payload as { code?: string }).code) : undefined;
+    throw new ApiError(code === "unauthenticated" ? "err.unauthenticated" : "err.profileNotFound", response.status === 401 ? "unauthenticated" : "not_found");
+  }
+  if (!payload || typeof payload !== "object" || !("profile" in payload)) {
+    throw new ApiError("err.profileNotFound", "not_found");
+  }
+  const profile = payload.profile as Partial<Profile> & { createdAt?: string; updatedAt?: string };
+  return {
+    email: typeof payload.email === "string" ? payload.email : "",
+    profile: {
+      userId: profile.userId ?? getSessionUserId() ?? "",
+      fullName: profile.fullName ?? "",
+      username: profile.username ?? "",
+      bio: profile.bio ?? "",
+      occupation: profile.occupation ?? "",
+      roles: profile.roles ?? [],
+      location: profile.location ?? "",
+      languages: profile.languages ?? [],
+      skills: profile.skills ?? [],
+      interests: profile.interests ?? [],
+      collabTypes: profile.collabTypes ?? [],
+      availability: profile.availability ?? "",
+      avatar: profile.avatar,
+      cover: profile.cover,
+      portfolio: profile.portfolio ?? [],
+      visibility: profile.visibility ?? { bio: true, location: false, skills: true, portfolio: true },
+      prefs: profile.prefs ?? { messages: true, exchanges: true, reviews: true },
+      qrToken: profile.qrToken ?? "",
+      language: isLang(profile.language) ? profile.language : "en",
+      createdAt: profile.createdAt ?? now(),
+      updatedAt: profile.updatedAt ?? now(),
+    },
+  };
 }
 
-export function isUsernameAvailable(username: string) {
-  const db = read();
-  const me = getSessionUserId();
+export async function isUsernameAvailable(username: string) {
   const u = username.trim().toLowerCase();
-  return USERNAME_RE.test(u) && !db.profiles.some((p) => p.username === u && p.userId !== me);
+  if (!USERNAME_RE.test(u)) return false;
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/api/profile/check-username?username=${encodeURIComponent(u)}`);
+  } catch {
+    throw new ApiError("err.generic", "network_error");
+  }
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new ApiError("err.generic", "server_error");
+  if (!payload || typeof payload !== "object" || !("available" in payload) || typeof payload.available !== "boolean") {
+    throw new ApiError("err.generic", "invalid_server_response");
+  }
+  return payload.available;
 }
 
 export type ProfileInput = Pick<Profile, "fullName" | "username" | "bio" | "occupation" | "roles" | "location" | "languages" | "skills" | "interests" | "collabTypes" | "availability" | "avatar" | "cover" | "portfolio" | "visibility">;
 
-export function updateProfile(input: ProfileInput) {
+export async function updateProfile(input: ProfileInput) {
   const fullName = clean(input.fullName, 80);
   const username = clean(input.username, 24).toLowerCase();
   need(fullName.length >= 2, "err.fullNameRequired");
@@ -312,12 +374,20 @@ export function updateProfile(input: ProfileInput) {
     .map((s) => ({ id: s.id || uid(), name: clean(s.name, 60), category: CATEGORIES.includes(s.category as never) ? s.category : "Other", level: s.level, description: clean(s.description, 300).slice(0, 300) }))
     .filter((s) => s.name)
     .slice(0, 20);
-  return transact((db) => {
-    const me = sessionUser(db);
-    need(!db.profiles.some((p) => p.username === username && p.userId !== me), "err.usernameTaken", "conflict");
-    const p = db.profiles.find((x) => x.userId === me)!;
-    Object.assign(p, {
-      fullName, username, bio,
+
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+
+  const response = await fetch(`${API_BASE_URL}/api/profile/me`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      fullName,
+      username,
+      bio,
       occupation: clean(input.occupation, 80).slice(0, 80),
       roles: list(input.roles),
       location: clean(input.location, 100).slice(0, 100),
@@ -330,16 +400,71 @@ export function updateProfile(input: ProfileInput) {
       cover: input.cover,
       portfolio: input.portfolio.slice(0, 8).map((x) => ({ id: x.id || uid(), title: clean(x.title, 80).slice(0, 80), image: x.image, link: /^https?:\/\//.test(x.link ?? "") ? x.link : undefined })).filter((x) => x.title),
       visibility: { ...input.visibility },
-      updatedAt: now(),
-    });
-    return p;
+    }),
   });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = payload && typeof payload === "object" && "code" in payload ? String((payload as { code?: string }).code) : undefined;
+    const message = code === "username_taken" ? "err.usernameTaken" : code === "invalid_profile" ? "err.usernameFormat" : "err.profileNotFound";
+    throw new ApiError(message, response.status === 409 ? "conflict" : response.status === 401 ? "unauthenticated" : "server_error");
+  }
+
+  const nextProfile = (payload as { profile?: Partial<Profile> }).profile ?? {};
+  const me = getSessionUserId() ?? "";
+  transact((db) => {
+    const user = db.users.find((u) => u.id === me);
+    if (user) user.email = user.email;
+    const profile = {
+      userId: me,
+      fullName: nextProfile.fullName ?? input.fullName,
+      username: nextProfile.username ?? input.username,
+      bio: nextProfile.bio ?? input.bio,
+      occupation: nextProfile.occupation ?? input.occupation,
+      roles: nextProfile.roles ?? input.roles,
+      location: nextProfile.location ?? input.location,
+      languages: nextProfile.languages ?? input.languages,
+      skills: nextProfile.skills ?? input.skills,
+      interests: nextProfile.interests ?? input.interests,
+      collabTypes: nextProfile.collabTypes ?? input.collabTypes,
+      availability: nextProfile.availability ?? input.availability,
+      avatar: nextProfile.avatar ?? input.avatar,
+      cover: nextProfile.cover ?? input.cover,
+      portfolio: nextProfile.portfolio ?? input.portfolio,
+      visibility: nextProfile.visibility ?? input.visibility,
+      prefs: nextProfile.prefs ?? { messages: true, exchanges: true, reviews: true },
+      qrToken: nextProfile.qrToken ?? "",
+      language: isLang(nextProfile.language) ? nextProfile.language : "en",
+      createdAt: nextProfile.createdAt ?? now(),
+      updatedAt: nextProfile.updatedAt ?? now(),
+    };
+    const index = db.profiles.findIndex((entry) => entry.userId === me);
+    if (index === -1) db.profiles.push(profile as Profile);
+    else db.profiles[index] = { ...db.profiles[index], ...profile };
+  });
+  return (payload as { profile?: Partial<Profile> }).profile ?? {};
 }
 
-export function updatePrefs(prefs: Profile["prefs"]) {
+export async function updatePrefs(prefs: Profile["prefs"]) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+  const response = await fetch(`${API_BASE_URL}/api/profile/me`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ prefs }),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const code = payload && typeof payload === "object" && "code" in payload ? String((payload as { code?: string }).code) : undefined;
+    throw new ApiError(code === "unauthenticated" ? "err.unauthenticated" : "err.profileNotFound", response.status === 401 ? "unauthenticated" : "server_error");
+  }
+  const { profile } = await getMe();
+  const userId = getSessionUserId();
+  if (!userId) throw new ApiError("err.unauthenticated", "unauthenticated");
   transact((db) => {
-    const me = sessionUser(db);
-    db.profiles.find((x) => x.userId === me)!.prefs = { ...prefs };
+    const stored = db.profiles.find((entry) => entry.userId === userId);
+    if (stored) stored.prefs = { ...prefs };
+    else db.profiles.push({ ...profile, prefs: { ...prefs } });
   });
 }
 
@@ -416,46 +541,51 @@ export function getReviewContext(exchangeId: ID) {
   };
 }
 
-export function getPublicProfile(username: string) {
-  const db = read();
-  const viewer = sessionUser(db);
-  const p = db.profiles.find((x) => x.username === username.toLowerCase());
-  if (!p) return null;
-  const isMe = p.userId === viewer;
-  const v = p.visibility;
-  const listings = db.listings.filter((l) => l.ownerId === p.userId && isPubliclyVisible(l));
-  return {
-    isMe,
-    blocked: blockedBetween(db, viewer, p.userId),
-    member: memberOf(db, p.userId),
-    verification: getPublicVerification(p.userId),
-    profile: {
-      fullName: p.fullName,
-      username: p.username,
-      occupation: p.occupation,
-      roles: p.roles,
-      avatar: p.avatar,
-      cover: p.cover,
-      languages: p.languages,
-      interests: p.interests,
-      collabTypes: p.collabTypes,
-      availability: p.availability,
-      createdAt: p.createdAt,
-      bio: v.bio || isMe ? p.bio : "",
-      location: v.location || isMe ? p.location : "",
-      skills: v.skills || isMe ? p.skills : [],
-      portfolio: v.portfolio || isMe ? p.portfolio : [],
-    },
-    offers: listings.filter((l) => l.kind === "offer"),
-    needs: listings.filter((l) => l.kind === "need"),
-    reviews: eligibleReviews(db).filter((r) => r.recipientId === p.userId).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map((r) => ({
-      ...r, reviewer: memberOf(db, r.reviewerId), verifiedExchange: true,
-      canOpenExchange: r.reviewerId === viewer || r.recipientId === viewer,
-      reported: db.reports.some((report) => report.reporterId === viewer && report.targetType === "review" && report.targetId === r.id),
-    })),
-    rating: ratingSummary(db, p.userId),
-    completedExchanges: db.exchanges.filter((x) => x.status === "completed" && (x.requesterId === p.userId || x.recipientId === p.userId)).length,
-  };
+export async function getPublicProfile(username: string) {
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/profile/${encodeURIComponent(username.toLowerCase())}`);
+    if (!response.ok) {
+      if (response.status === 404) return null;
+      throw new ApiError("err.profileNotFound", "not_found");
+    }
+    const payload = await response.json();
+    if (typeof payload !== "object" || payload === null || !("profile" in payload)) {
+      throw new ApiError("err.profileNotFound", "invalid_server_response");
+    }
+    const result = payload as { profile: Partial<Profile>; member?: { userId?: ID } };
+    const source = result.profile;
+    const profile: Profile = {
+      userId: source.userId ?? result.member?.userId ?? "",
+      fullName: source.fullName ?? "",
+      username: source.username ?? "",
+      bio: source.bio ?? "",
+      occupation: source.occupation ?? "",
+      roles: source.roles ?? [],
+      location: source.location ?? "",
+      languages: source.languages ?? [],
+      skills: source.skills ?? [],
+      interests: source.interests ?? [],
+      collabTypes: source.collabTypes ?? [],
+      availability: source.availability ?? "",
+      avatar: source.avatar,
+      cover: source.cover,
+      portfolio: source.portfolio ?? [],
+      visibility: source.visibility ?? { bio: true, location: false, skills: true, portfolio: true },
+      prefs: source.prefs ?? { messages: true, exchanges: true, reviews: true },
+      qrToken: source.qrToken,
+      language: isLang(source.language) ? source.language : "en",
+      createdAt: source.createdAt ?? now(),
+      updatedAt: source.updatedAt ?? now(),
+    };
+    return {
+      ...payload,
+      isMe: profile.userId === getSessionUserId(),
+      profile,
+    };
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError("err.profileNotFound", "not_found");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -525,59 +655,41 @@ export function publishedStatus(l: Listing) {
   return l.kind === "offer" ? "active" : "open";
 }
 
-export function createListing(kind: ListingKind, input: ListingInput, publish: boolean) {
+export async function createListing(kind: ListingKind, input: ListingInput, publish: boolean) {
   const errors = validateListing(kind, input);
   const first = Object.values(errors)[0];
   need(!first, first?.key ?? "err.invalid", "invalid", first?.vars);
-  return transact((db) => {
-    const me = sessionUser(db);
-    // Mandatory verification gate: enforced here, not in the UI.
-    if (publish) requireVerified(db, me, { businessClaimed: input.businessClaimed, category: input.category });
-    const t = now();
-    const normalized = normalizeListing(input);
-    // requireVerified() threw above if anything was missing, so a published listing is always
-    // fully verified by the time it is stored.
-    const l: Listing = {
-      id: uid(),
-      ownerId: me,
-      kind,
-      ...normalized,
-      businessClaimed: input.businessClaimed,
-      status: publish ? (kind === "offer" ? "active" : "open") : "draft",
-      createdAt: t,
-      updatedAt: t,
-    };
-    db.listings.push(l);
-    recountExchanges(db, me);
-    return l;
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+
+  const response = await fetch(`${API_BASE_URL}/api/listing/${kind}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ ...input, publish }),
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
+    throw new ApiError(body.message ?? (body.code === "unauthenticated" ? "err.unauthenticated" : "err.generic"), body.code ?? "server_error", body.vars);
+  }
+  return payload as Listing;
 }
 
-function ownedListing(db: DB, id: ID) {
-  const me = sessionUser(db);
-  const l = db.listings.find((x) => x.id === id && !x.deletedAt);
-  need(l, "err.listingGone", "not_found");
-  need(l.ownerId === me, "err.notYourListing", "forbidden");
-  return l;
-}
+export async function updateListing(id: ID, input: ListingInput, publish?: boolean) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
 
-export function updateListing(id: ID, input: ListingInput, publish?: boolean) {
-  return transact((db) => {
-    const l = ownedListing(db, id);
-    const errors = validateListing(l.kind, input);
-    const first = Object.values(errors)[0];
-  need(!first, first?.key ?? "err.invalid", "invalid", first?.vars);
-    const me = sessionUser(db);
-    Object.assign(l, normalizeListing(input), { updatedAt: now() });
-    l.businessClaimed = input.businessClaimed;
-    if (publish && l.status === "draft") {
-      requireVerified(db, me, { businessClaimed: l.businessClaimed, category: l.category });
-      l.status = l.kind === "offer" ? "active" : "open";
-      l.reviewReason = undefined;
-      l.reviewReasonVars = undefined;
-    }
-    return l;
+  const response = await fetch(`${API_BASE_URL}/api/listing/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ ...input, publish: !!publish }),
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
+    throw new ApiError(body.message ?? (body.code === "unauthenticated" ? "err.unauthenticated" : "err.generic"), body.code ?? "server_error", body.vars);
+  }
+  return payload as Listing;
 }
 
 const TRANSITIONS: Record<string, string[]> = {
@@ -600,59 +712,74 @@ export function allowedTransitions(l: Listing) {
   return TRANSITIONS[`${l.kind}:${l.status}`] ?? [];
 }
 
-export function setListingStatus(id: ID, status: string) {
-  return transact((db) => {
-    const l = ownedListing(db, id);
-    need(allowedTransitions(l).includes(status), "err.statusConflict", "conflict");
-    if (status === "active" || status === "open") {
-      need(!Object.keys(validateListing(l.kind, l)).length, "err.completeBeforePublish");
-      // Mandatory verification gate on every publish pathway.
-      requireVerified(db, l.ownerId, { businessClaimed: l.businessClaimed, category: l.category });
-    }
-    l.status = status as Listing["status"];
-    l.updatedAt = now();
-    return l;
+export async function setListingStatus(id: ID, status: string) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+  const response = await fetch(`${API_BASE_URL}/api/listing/${encodeURIComponent(id)}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ status }),
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
+    throw new ApiError(body.message ?? "err.generic", body.code ?? "server_error", body.vars);
+  }
+  return payload as Listing;
 }
 
 /** Hard delete only when nothing references the listing; otherwise soft delete to preserve history. */
-export function deleteListing(id: ID) {
-  return transact((db) => {
-    const l = ownedListing(db, id);
-    const referenced = db.exchanges.some((x) => x.listingId === id || x.offeredListingId === id) || db.saved.some((s) => s.listingId === id) || db.conversations.some((c) => c.contextType === "listing" && c.contextId === id);
-    if (referenced) {
-      l.deletedAt = now();
-      l.updatedAt = now();
-      return "archived" as const;
-    }
-    db.listings = db.listings.filter((x) => x.id !== id);
-    return "deleted" as const;
+export async function deleteListing(id: ID) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+
+  const response = await fetch(`${API_BASE_URL}/api/listing/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = payload && typeof payload === "object" && "code" in payload ? String((payload as { code?: string }).code) : undefined;
+    throw new ApiError(code === "unauthenticated" ? "err.unauthenticated" : "err.generic", response.status === 401 ? "unauthenticated" : "server_error");
+  }
+  return payload.status === "archived" ? "archived" : "deleted";
 }
 
-export function getMyListings(kind: ListingKind) {
-  const db = read();
-  const me = sessionUser(db);
-  return db.listings.filter((l) => l.ownerId === me && l.kind === kind && !l.deletedAt).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+export async function getMyListings(kind: ListingKind) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+  const response = await fetch(`${API_BASE_URL}/api/listing/me?kind=${encodeURIComponent(kind)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) throw new ApiError(response.status === 401 ? "err.unauthenticated" : "err.generic", response.status === 401 ? "unauthenticated" : "server_error");
+  return (await response.json()) as Listing[];
 }
 
-export function getListing(id: ID) {
-  const db = read();
-  const me = sessionUser(db);
-  const l = db.listings.find((x) => x.id === id);
-  if (!l) return null;
-  const isOwner = l.ownerId === me;
-  if (!isOwner && !isPubliclyVisible(l)) return { listing: null, unavailable: l.deletedAt ? "deleted" : "closed", isOwner };
-  return { listing: l, owner: memberOf(db, l.ownerId), isOwner, unavailable: null as null | string };
+export async function getListing(id: ID) {
+  const response = await fetch(`${API_BASE_URL}/api/listing/${encodeURIComponent(id)}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new ApiError("err.generic", "server_error");
+  const payload = await response.json();
+  const result = payload as { listing: Listing | null; owner: { userId: ID }; isOwner: boolean; unavailable: string | null };
+  return {
+    ...result,
+    isOwner: result.isOwner || result.listing?.ownerId === getSessionUserId(),
+  };
 }
 
 /** Publicly discoverable listings by other members (excludes blocked members). */
-export function getPublicListings() {
-  const db = read();
-  const me = sessionUser(db);
-  return db.listings
-    .filter((l) => l.ownerId !== me && isPubliclyVisible(l) && !blockedBetween(db, me, l.ownerId))
-    .map((l) => ({ listing: l, owner: memberOf(db, l.ownerId) }));
+export async function getPublicListings() {
+  const response = await fetch(`${API_BASE_URL}/api/listing/public`);
+  if (!response.ok) throw new ApiError("err.generic", "server_error");
+  const payload = await response.json();
+  if (!Array.isArray(payload)) throw new ApiError("err.generic", "invalid_server_response");
+  return payload.map((entry) => {
+    const listing = entry as Listing & { owner?: PublicMember };
+    return {
+      listing,
+      owner: listing.owner ?? { userId: listing.ownerId, fullName: "", username: "", occupation: "" },
+    };
+  });
 }
 
 /** Exchange requests linked to one of my listings (responses). */
@@ -752,7 +879,7 @@ export function verificationEligibility(db: DB, userId: ID, opts: { businessClai
  * and category. Used by the form UI to mirror the server exactly — the server still re-checks
  * on submission, so a UI bypass cannot publish.
  */
-export function getPublishEligibility(businessClaimed?: boolean, category?: string): Eligibility {
+export function getLocalPublishEligibility(businessClaimed?: boolean, category?: string): Eligibility {
   const db = read();
   const me = sessionUser(db);
   return verificationEligibility(db, me, { businessClaimed, category });
@@ -770,7 +897,7 @@ export function requireVerified(db: DB, userId: ID, opts: { businessClaimed?: bo
 }
 
 /** UI view of the signed-in member's verification record and platform provider state. */
-export function getVerification(): {
+export function getLocalVerification(): {
   verification: Verification;
   email: string;
   phoneConfigured: boolean;
@@ -795,13 +922,12 @@ export function getVerification(): {
     identityAvailable: db.verifyConfig.identity.type !== "none",
     identityType: db.verifyConfig.identity.type,
     requiredBusinessCategories: db.verifyConfig.requiredBusinessCategories,
-    // The same check the server enforces, surfaced so the UI can mirror it exactly.
     eligibility: verificationEligibility(db, me, { businessClaimed: false }),
     provider: db.verifyConfig,
   };
 }
 
-export function getVerifyEvents(limit = 30) {
+export function getLocalVerifyEvents(limit = 30) {
   const db = read();
   const me = sessionUser(db);
   return db.verifyEvents.filter((e) => e.userId === me).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
@@ -813,7 +939,7 @@ const isExpired = (o: { expiresAt: string }) => Date.now() > Date.parse(o.expire
  * Starts an OTP round. The code is generated and hashed outside the transaction, stored only
  * as SHA-256(salt + code), and never returned to the caller.
  */
-export async function requestVerificationCode(channel: "phone" | "email", destinationRaw: string) {
+export async function requestVerificationCodeLocal(channel: "phone" | "email", destinationRaw: string) {
   const destination = destinationRaw.trim();
   const lowered = destinationRaw.toLowerCase().trim();
   const formatErr = channel === "phone" ? validatePhone(destination) : validateEmail(lowered);
@@ -886,7 +1012,7 @@ function getVerificationProvider(channel: "phone" | "email"): ProviderConfig {
 }
 
 /** Verifies a submitted code: expiry, attempt limit and single-use are enforced here. */
-export async function verifyContactCode(channel: "phone" | "email", codeRaw: string) {
+export async function verifyContactCodeLocal(channel: "phone" | "email", codeRaw: string) {
   const code = codeRaw.trim();
   if (!code) throw new ApiError("verify.err.codeRequired", "invalid");
   if (!/^\d{6}$/.test(code)) throw new ApiError("verify.err.codeFormat", "invalid");
@@ -944,7 +1070,7 @@ export async function verifyContactCode(channel: "phone" | "email", codeRaw: str
 }
 
 /** Submits business evidence for moderator review. No identity documents are accepted. */
-export function submitBusinessEvidence(evidence: BusinessEvidence) {
+export function submitBusinessEvidenceLocal(evidence: BusinessEvidence) {
   const businessName = clean(evidence.businessName, 120);
   const ownerName = clean(evidence.ownerName, 80);
   const location = clean(evidence.location, 120);
@@ -982,7 +1108,7 @@ export function submitBusinessEvidence(evidence: BusinessEvidence) {
 }
 
 /** Own submission for the owner; the pending queue for reviewers. */
-export function getBusinessEvidence() {
+export function getBusinessEvidenceLocal() {
   const db = read();
   const me = sessionUser(db);
   const u = db.users.find((x) => x.id === me)!;
@@ -1022,7 +1148,7 @@ function reviewerOnly(db: DB): ID {
 }
 
 /** Reviewer action on submitted business evidence. */
-export function reviewBusinessEvidence(userId: ID, decision: "approve" | "reject", reason?: string) {
+export function reviewBusinessEvidenceLocal(userId: ID, decision: "approve" | "reject", reason?: string) {
   const reasonText = reason?.trim() ?? "";
   if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
   return transact((db) => {
@@ -1055,7 +1181,7 @@ export function reviewBusinessEvidence(userId: ID, decision: "approve" | "reject
  * Nothing sensitive is stored: only the name, a masked reference, and a note. Completion requires
  * a genuine reviewer approval — a submitted form never becomes a verified badge.
  */
-export function submitIdentityVerification(input: { fullName: string; idReference: string; note: string }) {
+export function submitIdentityVerificationLocal(input: { fullName: string; idReference: string; note: string }) {
   const fullName = clean(input.fullName, 80);
   const idReference = clean(input.idReference, 40);
   const note = clean(input.note, 500);
@@ -1094,7 +1220,7 @@ function maskIdentityReference(ref: string) {
 }
 
 /** Reviewer action on a submitted identity declaration. */
-export function reviewIdentityVerification(userId: ID, decision: "approve" | "reject", reason?: string) {
+export function reviewIdentityVerificationLocal(userId: ID, decision: "approve" | "reject", reason?: string) {
   const reasonText = reason?.trim() ?? "";
   if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
   return transact((db) => {
@@ -1125,7 +1251,7 @@ export function reviewIdentityVerification(userId: ID, decision: "approve" | "re
 }
 
 /** Own identity declaration for the owner; the pending queue for reviewers. */
-export function getIdentityEvidence() {
+export function getIdentityEvidenceLocal() {
   const db = read();
   const me = sessionUser(db);
   const u = db.users.find((x) => x.id === me)!;
@@ -1157,7 +1283,7 @@ export function getIdentityEvidence() {
 }
 
 /** Privacy-safe trust indicators for a member — never contact details or evidence. */
-export function getPublicVerification(userId: ID): PublicVerification {
+export function getLocalPublicVerification(userId: ID): PublicVerification {
   const db = read();
   const v = db.verifications.find((x) => x.userId === userId);
   if (!v) return { phoneVerified: false, emailVerified: false, businessVerified: false, identityVerified: false, completedExchanges: 0, trust: "new" };
@@ -1172,7 +1298,7 @@ export function getPublicVerification(userId: ID): PublicVerification {
 }
 
 /** Platform provider configuration. A clearly-labelled configuration capability, logged. */
-export function updateProviderConfig(channel: "phone" | "email", config: Partial<ProviderConfig>) {
+export function updateProviderConfigLocal(channel: "phone" | "email", config: Partial<ProviderConfig>) {
   const type = config.type ?? "none";
   need(["none", "http", "demo"].includes(type), "verify.err.providerType");
   if (type === "http") {
@@ -1207,7 +1333,7 @@ export function isAdmin() {
 }
 
 /** Alias kept for the verification service, which gates on the reviewer role. */
-export function isReviewer() {
+export function isLocalReviewer() {
   return isAdmin();
 }
 
@@ -1222,7 +1348,7 @@ function adminOnly(db: DB): ID {
  * Admin review queue: every pending submission, business and identity, in one place.
  * Requires the admin role; throws for ordinary users.
  */
-export function getAdminReviewQueue() {
+export function getAdminReviewQueueLocal() {
   const db = read();
   adminOnly(db);
   const business = db.verifications
@@ -1263,7 +1389,7 @@ export function getAdminReviewQueue() {
 }
 
 /** Admin overview statistics calculated from real records. */
-export function getAdminOverview() {
+export function getLocalAdminOverview() {
   const db = read();
   adminOnly(db);
   const totalUsers = db.users.length;
@@ -1285,7 +1411,7 @@ export function getAdminOverview() {
 }
 
 /** Admin user list — no passwords, hashes, tokens, or OTPs. */
-export function getAdminUsers(query = "", limit = 100) {
+export function getLocalAdminUsers(query = "", limit = 100) {
   const db = read();
   adminOnly(db);
   const q = query.trim().toLowerCase();
@@ -1319,7 +1445,7 @@ export function getAdminUsers(query = "", limit = 100) {
 }
 
 /** Suspend or activate an account (admin only). Logged. */
-export function setAccountStatus(userId: ID, status: "active" | "suspended", reason?: string) {
+export function setLocalAccountStatus(userId: ID, status: "active" | "suspended", reason?: string) {
   const reasonText = reason?.trim() ?? "";
   if (status === "suspended") need(reasonText.length >= 5, "verify.err.rejectReason");
   return transact((db) => {
@@ -1335,7 +1461,7 @@ export function setAccountStatus(userId: ID, status: "active" | "suspended", rea
 }
 
 /** Full review history for the admin dashboard (approved and rejected). */
-export function getAdminReviewHistory(limit = 50) {
+export function getAdminReviewHistoryLocal(limit = 50) {
   const db = read();
   adminOnly(db);
   return db.verifyEvents
@@ -1353,7 +1479,7 @@ export function getAdminReviewHistory(limit = 50) {
 /* ------------------------------------------------------------------ */
 
 /** Listings awaiting moderation (reviewers only). */
-export function getListingReviewQueue() {
+export function getListingReviewQueueLocal() {
   const db = read();
   reviewerOnly(db);
   return db.listings
@@ -1373,7 +1499,7 @@ export function getListingReviewQueue() {
 }
 
 /** Reviewer action on a listing awaiting moderation. */
-export function reviewListing(listingId: ID, decision: "approve" | "reject", reason?: string) {
+export function reviewListingLocal(listingId: ID, decision: "approve" | "reject", reason?: string) {
   const reasonText = reason?.trim() ?? "";
   if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
   return transact((db) => {
@@ -1406,22 +1532,19 @@ export function reviewListing(listingId: ID, decision: "approve" | "reject", rea
 }
 
 /** Owner action after a rejection; re-runs the policy so resubmission is reviewed again. */
-export function resubmitListing(listingId: ID) {
-  return transact((db) => {
-    const me = sessionUser(db);
-    const l = db.listings.find((x) => x.id === listingId && !x.deletedAt);
-    need(l && l.ownerId === me, "err.notYourListing", "forbidden");
-    need(l.status === "rejected", "verify.err.notRejected", "conflict");
-    requireVerified(db, me, { businessClaimed: l.businessClaimed, category: l.category });
-    l.status = l.kind === "offer" ? "active" : "open";
-    l.reviewReason = undefined;
-    l.reviewReasonVars = undefined;
-    l.reviewedBy = undefined;
-    l.reviewedAt = undefined;
-    audit(db, me, me, "listing_resubmitted", "verify.ev.resubmittedPublished", { title: l.title });
-    l.updatedAt = now();
-    return l;
+export async function resubmitListing(listingId: ID) {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+  const response = await fetch(`${API_BASE_URL}/api/listing/${encodeURIComponent(listingId)}/resubmit`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
+    throw new ApiError(body.message ?? "err.generic", body.code ?? "server_error", body.vars);
+  }
+  return payload as Listing;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1448,6 +1571,95 @@ export function toggleSave(listingId: ID): boolean {
     db.saved.push({ id: uid(), userId: me, listingId, createdAt: now() });
     return true;
   });
+}
+
+export {
+  getVerification,
+  getPublicVerification,
+  isReviewer,
+  getPublishEligibility,
+  getVerifyEvents,
+  requestVerificationCode,
+  verifyContactCode,
+  submitBusinessEvidence,
+  getBusinessEvidence,
+  reviewBusinessEvidence,
+  submitIdentityVerification,
+  getIdentityEvidence,
+  reviewIdentityVerification,
+  updateProviderConfig,
+  getAdminReviewQueue,
+  getAdminReviewHistory,
+  getListingReviewQueue,
+  reviewListing,
+} from "./verification-api";
+
+async function getAdminBackend<T>(path: string, method = "GET", body?: unknown): Promise<T> {
+  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    throw new ApiError("err.generic", "network_error");
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
+    throw new ApiError(body.message ?? "err.generic", body.code ?? "server_error", body.vars);
+  }
+  return payload as T;
+}
+
+export async function getAdminOverview() {
+  const verification = await getAdminBackend<Omit<ReturnType<typeof getLocalAdminOverview>, "activeExchanges" | "completedExchanges">>(
+    "/api/verification/admin/overview",
+  );
+  const db = read();
+  return {
+    ...verification,
+    activeExchanges: db.exchanges.filter((exchange) => exchange.status === "active").length,
+    completedExchanges: db.exchanges.filter((exchange) => exchange.status === "completed").length,
+  };
+}
+
+export async function getAdminUsers(query = "", limit = 100) {
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  return getAdminBackend<{
+    users: Array<{
+      userId: ID;
+      fullName: string;
+      username: string;
+      email: string;
+      role: UserRole;
+      status: "active" | "suspended";
+      createdAt: string;
+      phoneVerified: boolean;
+      emailVerified: boolean;
+      businessVerified: boolean;
+      identityVerified: boolean;
+      trust: TrustTier;
+      listings: number;
+      activeOffers: number;
+      openNeeds: number;
+    }>;
+    total: number;
+  }>(`/api/verification/admin/users?${params.toString()}`);
+}
+
+export async function setAccountStatus(userId: ID, status: "active" | "suspended", reason?: string) {
+  return getAdminBackend<{ status: "active" | "suspended" }>(
+    `/api/verification/admin/users/${encodeURIComponent(userId)}/status`,
+    "PATCH",
+    { status, reason },
+  );
 }
 
 export function getSaved() {

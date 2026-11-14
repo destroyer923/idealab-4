@@ -192,7 +192,7 @@ export function ListingThumb({ listing }: { listing: Listing }) {
 
 export function ProposeExchangeDialog({ open, onClose, recipient, listing, suggestedProvide, suggestedReceive }: { open: boolean; onClose: () => void; recipient: PublicMember; listing?: Listing; suggestedProvide?: string; suggestedReceive?: string }) {
   const t = useT();
-  const { data: myOffers } = useQuery(() => (open ? getMyListings("offer").filter((l) => l.status === "active") : []), [open]);
+  const { data: myOffers } = useQuery(async () => (open ? (await getMyListings("offer")).filter((l) => l.status === "active") : []), [open]);
   const initial = useMemo(() => {
     if (!listing) return { provide: suggestedProvide ?? "", receive: suggestedReceive ?? "" };
     return listing.kind === "offer"

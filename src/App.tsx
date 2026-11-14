@@ -52,7 +52,7 @@ function Routes({ me }: { me: string }) {
   if (path === "/scan-qr" || path === "/messages/scan") return <ScanQrPage />;
   if ((p = m("/messages/:id"))) return <Messages id={p.id} me={me} />;
   if (path === "/saved") return <Saved />;
-  if (path === "/profile") return <MyProfile />;
+  if (path === "/profile" || path === "/account") return <MyProfile />;
   if (path === "/profile/edit") return <ProfileEdit />;
   if ((p = m("/u/:username"))) return <PublicProfile key={p.username} username={p.username} />;
   if (path === "/reviews") return <Reviews />;
