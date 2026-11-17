@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { ApiError, getVersion, refreshStore, subscribe } from "./db";
 import { hasKey, translate, useLang, type Key } from "./i18n";
 

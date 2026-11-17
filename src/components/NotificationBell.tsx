@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bell, BellOff, Check, Handshake, MessageCircle, ShieldCheck, Star, UserPlus, X } from "lucide-react";
+import { Bell, BellOff, Check, Handshake, MessageCircle, Star, UserPlus, X } from "lucide-react";
 import { getNotificationInbox, markNotificationsRead } from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
 import { dyn, useI18n } from "@/lib/i18n";
@@ -17,7 +17,7 @@ export function NotificationBell() {
   const ref = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const unread = inbox.data?.unread ?? 0;
-  const icons = { message: MessageCircle, exchange: Handshake, review: Star, verification: ShieldCheck, connection: UserPlus };
+  const icons = { message: MessageCircle, exchange: Handshake, review: Star, connection: UserPlus, verification: Bell };
 
   const close = () => { setOpen(false); trigger.current?.focus(); };
   useEffect(() => {
@@ -35,7 +35,7 @@ export function NotificationBell() {
     setActionError("");
     try {
       await markNotificationsRead(ids);
-      if (link && /^\/(messages|collaborations|exchange|listing|u|verification|reviews|profile|dashboard|qr-code|scan-qr)(\/|\?|$)/.test(link)) {
+      if (link && /^\/(messages|collaborations|exchange|listing|u|reviews|profile|dashboard|qr-code|scan-qr)(\/|\?|$)/.test(link)) {
         close();
         navigate(link);
       }

@@ -1,16 +1,17 @@
+import { installMockAuthApi } from "./mock-test-auth";
+
 const s: Record<string,string> = {}, tab: Record<string,string> = {};
 const g = globalThis as any;
 const mk=(o:any)=>({getItem:(k:string)=>o[k]??null,setItem:(k:string,v:string)=>void(o[k]=String(v)),removeItem:(k:string)=>void delete o[k]});
 g.localStorage=mk(s); g.sessionStorage=mk(tab);
 g.window={location:{hash:"#/dashboard"},addEventListener(){},removeEventListener(){},scrollTo(){},matchMedia:()=>({matches:false,addEventListener(){},removeEventListener(){}})};
 g.document={visibilityState:"visible",addEventListener(){},removeEventListener(){}};
+installMockAuthApi();
 const { renderToString } = await import("react-dom/server"); const { createElement } = await import("react");
-const api = await import("../src/lib/api"); const db = await import("../src/lib/db"); const { default: App } = await import("../src/App");
+const api = await import("../src/lib/api"); const { default: App } = await import("../src/App");
 await api.register({email:"o@x.in",password:"password1",fullName:"Other Member",username:"other"});
-// Pre-approved verification fixture for this isolated render test only.
-db.transact((state) => { const v=state.verifications.find(v=>v.userId===api.currentUserId())!; v.phone.status="verified";v.email.status="verified";v.identity.status="verified"; });
-api.createListing("offer",{title:"Handwoven cotton sarees",category:"Handicrafts",type:"Physical Resource",description:"Handwoven cotton sarees made on a family loom.",details:"Sarees",exchangePref:"",location:"",availability:"",mode:"",quantity:"",tags:[],images:[]},true);
-api.createListing("need",{title:"Delivery to Pune market",category:"Transport",type:"Transportation / Logistics",description:"Weekly delivery of crates to the Pune market.",details:"Transport",exchangePref:"",location:"",availability:"",mode:"",quantity:"",tags:[],images:[]},true);
+await api.createListing("offer",{title:"Handwoven cotton sarees",category:"Handicrafts",type:"Physical Resource",description:"Handwoven cotton sarees made on a family loom.",details:"Sarees",exchangePref:"",location:"",availability:"",mode:"",quantity:"",tags:[],images:[]},true);
+await api.createListing("need",{title:"Delivery to Pune market",category:"Transport",type:"Transportation / Logistics",description:"Weekly delivery of crates to the Pune market.",details:"Transport",exchangePref:"",location:"",availability:"",mode:"",quantity:"",tags:[],images:[]},true);
 api.logout();
 await api.register({email:"me@x.in",password:"password1",fullName:"Meera Joshi",username:"meera"});
 const html = renderToString(createElement(App));

@@ -3,7 +3,6 @@ import { z } from "zod";
 import { ListingModel } from "../models/Listing.js";
 import { ProfileModel } from "../models/Profile.js";
 import { UserModel } from "../models/User.js";
-import { VerificationModel, VerificationRecord } from "../models/Verification.js";
 import { requireAuth, type AuthenticatedRequest } from "../middleware/auth.js";
 
 const router = Router();
@@ -41,6 +40,17 @@ function sanitizeProfile(profile: Record<string, unknown>) {
   const next = { ...profile };
   if (typeof next.avatar === "string" && next.avatar.length === 0) next.avatar = undefined;
   if (typeof next.cover === "string" && next.cover.length === 0) next.cover = undefined;
+  return next;
+}
+
+function sanitizePublicProfile(profile: Record<string, unknown>) {
+  const next = sanitizeProfile(profile);
+  const visibility = (profile.visibility ?? {}) as Record<string, unknown>;
+  if (visibility?.bio === false) next.bio = "";
+  if (visibility.location !== true) next.location = "";
+  if (visibility?.skills === false) next.skills = [];
+  if (visibility?.portfolio === false) next.portfolio = [];
+  delete next.prefs;
   return next;
 }
 
@@ -132,9 +142,7 @@ router.get("/:username", async (req, res) => {
       res.status(404).json({ code: "not_found", message: "Profile not found" });
       return;
     }
-
     const profile = user.profile ?? await ProfileModel.findOne({ userId: user.id }).lean();
-    const verification = await VerificationModel.findOne({ userId: user.id }).lean<VerificationRecord>();
     const listings = await ListingModel.find({
       ownerId: user.id,
       status: { $in: ["active", "open", "matched"] },
@@ -148,16 +156,8 @@ router.get("/:username", async (req, res) => {
         username: profile?.username ?? user.profile?.username ?? "",
         occupation: profile?.occupation ?? user.profile?.occupation ?? "",
         avatar: profile?.avatar ?? user.profile?.avatar,
-        verification: {
-          phoneVerified: verification?.phone.status === "verified",
-          emailVerified: verification?.email.status === "verified",
-          businessVerified: verification?.business.status === "verified",
-          identityVerified: verification?.identity.status === "verified",
-          completedExchanges: verification?.completedExchanges ?? 0,
-          trust: verification?.trust ?? "new",
-        },
       },
-      profile: sanitizeProfile(profile ?? user.profile ?? {}),
+      profile: sanitizePublicProfile(profile ?? user.profile ?? {}),
       offers: listings.filter((listing) => listing.kind === "offer"),
       needs: listings.filter((listing) => listing.kind === "need"),
       reviews: [],

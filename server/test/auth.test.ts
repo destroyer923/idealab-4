@@ -3,7 +3,6 @@ import { pbkdf2Sync } from "node:crypto";
 import { test } from "node:test";
 import bcrypt from "bcryptjs";
 import { isDuplicateKeyError, normalizeEmail, registrationAccountExists, verifyPasswordAndUpgrade } from "../src/auth/password.js";
-import { isAdminRole } from "../../src/lib/roles.ts";
 
 test("legacy PBKDF2 account login upgrades the existing hash to bcrypt", async () => {
   const password = "legacy-correct-password";
@@ -75,10 +74,4 @@ test("duplicate key errors are recognized without mutating account data", () => 
   assert.equal(isDuplicateKeyError({ code: 11000 }), true);
   assert.equal(isDuplicateKeyError({ code: 11001 }), false);
   assert.equal(isDuplicateKeyError(new Error("duplicate")), false);
-});
-
-test("admin login accepts admins and rejects ordinary members", () => {
-  assert.equal(isAdminRole("admin"), true);
-  assert.equal(isAdminRole("member"), false);
-  assert.equal(isAdminRole(undefined), false);
 });

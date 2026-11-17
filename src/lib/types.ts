@@ -8,7 +8,6 @@ export type UserRole = "member" | "reviewer" | "admin";
 export interface User {
   id: ID;
   email: string;
-  /** Reviewer accounts can action business-evidence and listing moderation. */
   role: UserRole;
   /** Account status; suspended users cannot sign in or act. */
   status: "active" | "suspended";
@@ -97,13 +96,6 @@ export interface Listing {
   tags: string[];
   images: string[];
   status: OfferStatus | NeedStatus;
-  /** True when the author declared this a registered business / enterprise. */
-  businessClaimed?: boolean;
-  /** Translation key explaining why moderation is required or why it was rejected. */
-  reviewReason?: Key;
-  reviewReasonVars?: Vars;
-  reviewedBy?: ID;
-  reviewedAt?: string;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
@@ -291,147 +283,6 @@ export interface Report {
   createdAt: string;
 }
 
-export type CheckStatus = "not_started" | "pending" | "verified" | "rejected" | "unavailable";
-export type TrustTier = "new" | "contact_verified" | "business_verified" | "identity_verified";
-
-export interface ContactCheck {
-  status: CheckStatus;
-  /** Masked destination, e.g. +91****5678 — never the full value. */
-  masked: string;
-  at?: string;
-  attempts: number;
-  lastSentAt?: string;
-  note?: Key;
-}
-
-export type BusinessType = "farmer" | "artisan" | "seller" | "designer" | "transporter" | "trader" | "service" | "other";
-
-export interface BusinessDocument {
-  title: string;
-  type: "photo" | "text" | "link";
-  value: string;
-}
-
-export interface BusinessEvidence {
-  businessType: BusinessType;
-  businessName: string;
-  ownerName: string;
-  udyamNumber: string;
-  location: string;
-  description: string;
-  documents: BusinessDocument[];
-}
-
-export interface BusinessCheck {
-  status: CheckStatus;
-  submittedAt?: string;
-  reviewedAt?: string;
-  reviewedBy?: ID;
-  /** Translation key explaining a rejection. */
-  rejectionReason?: Key;
-  rejectionVars?: Vars;
-  evidence?: BusinessEvidence;
-}
-
-export interface IdentitySubmission {
-  fullName: string;
-  /** Masked reference to a government identity document; never the document itself. */
-  idReference: string;
-  note: string;
-}
-
-export interface IdentityCheck {
-  status: CheckStatus;
-  at?: string;
-  note?: Key;
-  submission?: IdentitySubmission;
-  submittedAt?: string;
-  reviewedAt?: string;
-  reviewedBy?: ID;
-  rejectionReason?: Key;
-  rejectionVars?: Vars;
-}
-
-export interface Verification {
-  userId: ID;
-  phone: ContactCheck;
-  email: ContactCheck;
-  business: BusinessCheck;
-  identity: IdentityCheck;
-  /** Completed exchanges the member took part in (derived count kept for display). */
-  completedExchanges: number;
-  trust: TrustTier;
-  updatedAt: string;
-}
-
-export interface Otp {
-  id: ID;
-  userId: ID;
-  channel: "phone" | "email";
-  destination: string;
-  /** SHA-256(salt + code); the code itself is never stored. */
-  otpHash: string;
-  salt: string;
-  expiresAt: string;
-  attempts: number;
-  attemptsAt: number[];
-  createdAt: string;
-  sentAt: string;
-}
-
-export type VerifyEventType =
-  | "otp_requested"
-  | "otp_failed_send"
-  | "otp_verified"
-  | "identity_submitted"
-  | "identity_reviewed"
-  | "otp_attempts_exhausted"
-  | "otp_expired"
-  | "business_submitted"
-  | "business_reviewed"
-  | "identity_unavailable"
-  | "listing_needs_review"
-  | "listing_approved"
-  | "listing_rejected"
-  | "listing_resubmitted"
-  | "role_changed";
-
-export interface VerifyEvent {
-  id: ID;
-  userId: ID;
-  actorId: ID;
-  type: VerifyEventType;
-  key: Key;
-  vars?: Vars;
-  body?: string;
-  createdAt: string;
-}
-
-export interface ProviderConfig {
-  channel: "phone" | "email";
-  type: "none" | "http" | "demo";
-  endpoint: string;
-  apiToken: string;
-  label: string;
-}
-
-export interface IdentityProviderConfig {
-  channel: "identity";
-  /** none = unavailable (blocks publishing); http = real provider; manual = reviewer-approved workflow */
-  type: "none" | "http" | "manual";
-  endpoint: string;
-  apiToken: string;
-  label: string;
-}
-
-export interface VerifyConfig {
-  phone: ProviderConfig;
-  email: ProviderConfig;
-  identity: IdentityProviderConfig;
-  /** Categories that require business verification before publishing. */
-  requiredBusinessCategories: string[];
-}
-
 export interface DB {
   users: User[];
   profiles: Profile[];
@@ -447,20 +298,6 @@ export interface DB {
   blocks: Block[];
   reports: Report[];
   connections: Connection[];
-  verifications: Verification[];
-  otps: Otp[];
-  verifyEvents: VerifyEvent[];
-  verifyConfig: VerifyConfig;
-}
-
-/** Public-safe view of a member — never includes email/credentials. */
-export interface PublicVerification {
-  phoneVerified: boolean;
-  emailVerified: boolean;
-  businessVerified: boolean;
-  identityVerified: boolean;
-  completedExchanges: number;
-  trust: TrustTier;
 }
 
 /** Public-safe view of a member — never includes email/credentials/evidence. */
@@ -471,5 +308,4 @@ export interface PublicMember {
   occupation: string;
   avatar?: string;
   location?: string;
-  verification?: PublicVerification;
 }

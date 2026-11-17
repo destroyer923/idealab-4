@@ -2,6 +2,10 @@
 import mongoose from "mongoose";
 
 export async function connectDB(): Promise<void> {
+  if (process.env.NODE_ENV === "test") {
+    throw new Error("Production MongoDB connections are disabled in test mode");
+  }
+
   const uri = process.env.MONGODB_URI;
 
   if (!uri) {

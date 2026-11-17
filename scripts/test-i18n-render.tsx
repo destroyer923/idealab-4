@@ -6,6 +6,8 @@
  *
  * Run: npx esbuild scripts/test-i18n-render.tsx --bundle --platform=node --format=esm --alias:@=./src --jsx=automatic --outfile=/tmp/t.mjs && node /tmp/t.mjs
  */
+import { installMockAuthApi } from "./mock-test-auth";
+
 const store: Record<string, string> = {};
 const g = globalThis as any;
 g.localStorage = { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => void (store[k] = String(v)), removeItem: (k: string) => void delete store[k] };
@@ -13,6 +15,7 @@ const tab: Record<string, string> = {};
 g.sessionStorage = { getItem: (k: string) => tab[k] ?? null, setItem: (k: string, v: string) => void (tab[k] = String(v)), removeItem: (k: string) => void delete tab[k] };
 g.window = { location: { hash: "" }, addEventListener() {}, removeEventListener() {}, scrollTo() {}, matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
 g.document = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };
+installMockAuthApi();
 
 const { renderToString } = await import("react-dom/server");
 const { createElement } = await import("react");
@@ -31,44 +34,27 @@ const ok = (c: unknown, m: string) => (c ? pass++ : (fail++, console.log("  ✗ 
 const USER_TEXT: string[] = [];
 const u = (s: string) => (USER_TEXT.push(s), s);
 
-/**
- * Completes mandatory verification for an account: phone OTP, email code, then a submitted
- * identity declaration approved by a reviewer.
- */
-async function verify(me: string) {
-  const p = await api.requestVerificationCode("phone", "+91 9876543210");
-  await api.verifyContactCode("phone", p.demoCode!);
-  const e = await api.requestVerificationCode("email", api.getMe().email);
-  await api.verifyContactCode("email", e.demoCode!);
-  api.submitIdentityVerification({ fullName: api.getMe().profile.fullName, idReference: "AA-9999-8888", note: "Aadhaar card, pending review." });
-  // the test harness grants reviewer access so the submission can be approved
-  db.transact((state) => { state.users.find((u) => u.id === me)!.role = "admin"; });
-  api.reviewIdentityVerification(me, "approve");
-}
 const base = { availability: "", mode: "" as const, quantity: "", images: [] as string[] };
 
 i18n.setVisitorLang("hi"); // visitor picks Hindi before registering
 await api.register({ email: "priya@x.in", password: "password2", fullName: u("Priya Shah"), username: u("priya"), language: i18n.visitorLang() });
 ok(i18n.getLang() === "hi", "registration adopts visitor language (hi)");
 const priya = api.currentUserId()!;
-await verify(priya);
-const pOffer = api.createListing("offer", { ...base, title: u("Packaging and logo design"), category: "Design", type: "Service", description: u("I design product packaging, labels and logos for small brands."), details: u("Packaging design, logo design, labels"), exchangePref: u("Organic vegetables or produce"), location: u("Nashik"), tags: [u("design")] }, true);
-api.createListing("need", { ...base, title: u("Organic vegetables for my family"), category: "Food & Produce", type: "Physical Resource / Product", description: u("Looking for a regular supply of fresh organic vegetables."), details: u("Organic vegetables weekly"), exchangePref: "", location: "", tags: [] }, true);
+const pOffer = await api.createListing("offer", { ...base, title: u("Packaging and logo design"), category: "Design", type: "Service", description: u("I design product packaging, labels and logos for small brands."), details: u("Packaging design, logo design, labels"), exchangePref: u("Organic vegetables or produce"), location: u("Nashik"), tags: [u("design")] }, true);
+await api.createListing("need", { ...base, title: u("Organic vegetables for my family"), category: "Food & Produce", type: "Physical Resource / Product", description: u("Looking for a regular supply of fresh organic vegetables."), details: u("Organic vegetables weekly"), exchangePref: "", location: "", tags: [] }, true);
 api.logout();
 
 i18n.setVisitorLang("en");
 await api.register({ email: "sam@x.in", password: "password3", fullName: u("Sameer Kale"), username: u("sameer") });
 const sameer = api.currentUserId()!;
-await verify(sameer);
-const sOffer = api.createListing("offer", { ...base, title: u("Product photography"), category: "Photography", type: "Service", description: u("Clean product photos for online shops and catalogues."), details: u("Product photography with lighting"), exchangePref: u("Organic products"), location: "", tags: [] }, true);
+const sOffer = await api.createListing("offer", { ...base, title: u("Product photography"), category: "Photography", type: "Service", description: u("Clean product photos for online shops and catalogues."), details: u("Product photography with lighting"), exchangePref: u("Organic products"), location: "", tags: [] }, true);
 api.logout();
 
 await api.register({ email: "raj@x.in", password: "password1", fullName: u("Raj Patil"), username: u("raj") });
 const raj = api.currentUserId()!;
-await verify(raj);
-const rOffer = api.createListing("offer", { ...base, title: u("Fresh Organic Vegetables"), category: "Agriculture", type: "Physical Resource", description: u("Seasonal vegetables grown with organic practices on my farm."), details: u("Organic vegetables, tomatoes, spinach"), exchangePref: u("Packaging design for my products"), location: u("Nashik"), tags: [u("organic")] }, true);
-api.createListing("need", { ...base, title: u("Packaging design for organic produce"), category: "Design", type: "Skill", description: u("Need attractive packaging and labels for my vegetable boxes."), details: u("Packaging design and logo"), exchangePref: u("Organic vegetables"), location: "", tags: [] }, true);
-api.createListing("offer", { ...base, title: u("Tractor day loan"), category: "Agriculture", type: "Equipment Loan", description: u("Tractor available for a day on weekends nearby."), details: u("Tractor"), exchangePref: "", location: "", tags: [] }, false);
+const rOffer = await api.createListing("offer", { ...base, title: u("Fresh Organic Vegetables"), category: "Agriculture", type: "Physical Resource", description: u("Seasonal vegetables grown with organic practices on my farm."), details: u("Organic vegetables, tomatoes, spinach"), exchangePref: u("Packaging design for my products"), location: u("Nashik"), tags: [u("organic")] }, true);
+await api.createListing("need", { ...base, title: u("Packaging design for organic produce"), category: "Design", type: "Skill", description: u("Need attractive packaging and labels for my vegetable boxes."), details: u("Packaging design and logo"), exchangePref: u("Organic vegetables"), location: "", tags: [] }, true);
+await api.createListing("offer", { ...base, title: u("Tractor day loan"), category: "Agriculture", type: "Equipment Loan", description: u("Tractor available for a day on weekends nearby."), details: u("Tractor"), exchangePref: "", location: "", tags: [] }, false);
 api.toggleSave(pOffer.id);
 api.toggleSave(sOffer.id);
 const conv = await api.openConversation(priya, "listing", pOffer.id);

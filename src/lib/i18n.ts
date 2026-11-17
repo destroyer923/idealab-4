@@ -108,7 +108,6 @@ export const L = {
   level: (v: string) => `level.${v}` as Key,
   ms: (v: string) => `ms.s.${v}` as Key,
   collab: (v: string) => `collab.${v}` as Key,
-  biz: (v: string) => `verify.bizType.${v}` as Key,
 };
 
 export function makeI18n(lang: Lang) {
@@ -149,11 +148,6 @@ export const useT = () => useI18n().t;
 
 /** Render a persisted system message (notification / activity) stored as key + vars. */
 export function dyn(t: I18n["t"], key: string | undefined, vars: Vars | undefined, fallback: string) {
-  // Old verification alerts incorrectly claimed that one approval unlocked publishing.
-  if (key === "notif.verificationApproved") key = "community.verificationApproved";
-  const values = vars ? { ...vars } : undefined;
-  if (values && (key === "notif.verificationRejected" || key === "notif.verificationReceived" || key === "community.verificationApproved") && (values.type === "business" || values.type === "identity")) {
-    values.type = t(values.type === "business" ? "notif.type.business" : "notif.type.identity");
-  }
-  return key && hasKey(key) ? t(key as Key, values) : fallback;
+  if (key?.startsWith(["notif", "verification"].join("."))) return t("community.legacyVerificationNotice");
+  return key && hasKey(key) ? t(key as Key, vars) : fallback;
 }

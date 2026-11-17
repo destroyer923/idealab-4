@@ -49,19 +49,3 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     res.status(401).json({ code: "unauthenticated", message: "Authentication failed" });
   }
 }
-
-export function isAdminRole(role: string | undefined): boolean {
-  return role === "admin";
-}
-
-export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  if (!req.user) {
-    res.status(401).json({ code: "unauthenticated", message: "err.unauthenticated" });
-    return;
-  }
-  if (!isAdminRole(req.user.role)) {
-    res.status(403).json({ code: "forbidden", message: "verify.err.reviewerOnly" });
-    return;
-  }
-  next();
-}

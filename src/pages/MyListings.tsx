@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import { PAGE_IMAGES } from "@/lib/images";
-import { ClipboardList, Eye, FilterX, HandHeart, Inbox, Pencil, PlusCircle, RefreshCw, Trash2 } from "lucide-react";
+import { ClipboardList, Eye, FilterX, HandHeart, Inbox, Pencil, PlusCircle, Trash2 } from "lucide-react";
 import { cn } from "@/utils/cn";
-import { allowedTransitions, deleteListing, getMyListings, resubmitListing, responseCount, setListingStatus } from "@/lib/api";
+import { allowedTransitions, deleteListing, getMyListings, responseCount, setListingStatus } from "@/lib/api";
 import { read } from "@/lib/db";
-import { CATEGORIES, NEED_STATUSES, OFFER_STATUSES } from "@/lib/constants";
+import { CATEGORIES } from "@/lib/constants";
 import { useDebounced, useQuery } from "@/lib/hooks";
 import { L, useI18n, type Key } from "@/lib/i18n";
 import type { Listing, ListingKind } from "@/lib/types";
@@ -13,24 +13,19 @@ import { ListingCard, StatusBadge } from "@/components/listing";
 
 const ACTION: Record<string, Key> = {
   "offer:active": "ml.publish",
-  "offer:pending_review": "ml.reviewing",
-  "offer:rejected": "ml.resubmit",
   "offer:inactive": "ml.deactivate",
-  "need:pending_review": "ml.reviewing",
-  "need:rejected": "ml.resubmit",
   "need:open": "ml.reopen",
   "need:matched": "ml.markMatched",
   "need:in_progress": "ml.markInProgress",
   "need:paused": "ml.pause",
   "need:fulfilled": "ml.markFulfilled",
 };
-const CONFIRMABLE = new Set(["offer:inactive", "need:paused", "need:fulfilled", "offer:pending_review", "need:pending_review"]);
+const CONFIRMABLE = new Set(["offer:inactive", "need:paused", "need:fulfilled"]);
 
 function StatusActions({ l, onDelete, onChanged }: { l: Listing; onDelete: () => void; onChanged: () => void }) {
   const { t } = useI18n();
   const [pending, setPending] = useState<string | null>(null);
   const change = async (to: string) => {
-    if (to === "rejected") return;
     try {
       await setListingStatus(l.id, to);
       toast.success(t("ml.statusUpdated", { status: t(L.status(l.kind, to)) }));
@@ -55,9 +50,6 @@ function StatusActions({ l, onDelete, onChanged }: { l: Listing; onDelete: () =>
         );
       })}
       <Button size="sm" variant="ghost" icon={Trash2} className="text-red-600 hover:bg-red-50 hover:text-red-700" onClick={onDelete} aria-label={t("ml.deleteAria", { title: l.title })}>{t("common.delete")}</Button>
-      {l.status === "rejected" && (
-        <Button size="sm" variant="soft" icon={RefreshCw} onClick={async () => { try { await resubmitListing(l.id); onChanged(); } catch (e) { toast.error(errMsg(e)); } }}>{t("ml.resubmit")}</Button>
-      )}
       {pending && (
         <ConfirmDialog open onClose={() => setPending(null)} onConfirm={() => change(pending)} title={t(`ml.c.${ck}.title` as Key)} body={t(`ml.c.${ck}.body` as Key)} confirmLabel={t(`ml.c.${ck}.label` as Key)} />
       )}
@@ -82,11 +74,11 @@ export default function MyListings({ kind }: { kind: ListingKind }) {
   const [del, setDel] = useState<Listing | null>(null);
 
   const all = res.data ?? [];
-  const statuses: string[] = isOffer ? [...OFFER_STATUSES.filter((s) => s !== "draft"), "draft"] : [...NEED_STATUSES.filter((s) => s !== "draft"), "draft"];
+  const statuses: string[] = isOffer
+    ? ["active", "inactive", "draft"]
+    : ["open", "matched", "in_progress", "fulfilled", "paused", "draft"];
   const label = (s: string) => {
     if (s === "draft") return t("ml.tab.draft");
-    if (s === "pending_review") return t("ml.tab.pending_review");
-    if (s === "rejected") return t("ml.tab.rejected");
     return isOffer ? t(`ml.tab.${s}` as Key) : t(L.status("need", s));
   };
   const count = (s: string) => all.filter((x) => x.l.status === s).length;

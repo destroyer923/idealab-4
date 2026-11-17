@@ -7,7 +7,6 @@ import { L, useI18n, type Key } from "@/lib/i18n";
 import { useLocation } from "@/lib/router";
 import type { Profile } from "@/lib/types";
 import { Avatar, Badge, Button, Card, EmptyState, ErrorState, LinkButton, Spinner, Tabs, focusRing } from "@/components/ui";
-import { TrustBadges, TrustLevel } from "@/components/trust";
 import { ProfileReviews } from "@/components/ProfileReviews";
 import { ConnectionActions } from "@/components/ConnectionActions";
 import { ListingCard, MessageButton, ProposeExchangeDialog } from "@/components/listing";
@@ -48,7 +47,6 @@ export function PublicProfile({ username }: { username: string }) {
   const { profile: p, isMe, member, offers, needs, reviews, rating, completedExchanges, blocked } = res.data;
   const completion = isMe && me.data ? profileCompletion(me.data.profile) : null;
   const vis = me.data?.profile.visibility;
-  const verification = res.data.verification ?? member.verification;
   const first = p.fullName.split(" ")[0];
   const hiddenIcon = <EyeOff className="h-3.5 w-3.5 text-slate-400" aria-label={t("pf.hidden")} />;
 
@@ -89,12 +87,6 @@ export function PublicProfile({ username }: { username: string }) {
               {p.languages.length > 0 && <span className="inline-flex items-center gap-1.5"><Languages className="h-4 w-4" />{p.languages.join(", ")}</span>}
               {p.availability && <span className="inline-flex items-center gap-1.5"><Clock className="h-4 w-4" />{p.availability}</span>}
             </div>
-            {verification && (verification.trust !== "new" || verification.completedExchanges > 0) && (
-              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                <TrustLevel trust={verification.trust} />
-                <TrustBadges v={verification} />
-              </div>
-            )}
             {p.roles.length > 0 && <div className="mt-3 flex flex-wrap gap-1.5">{p.roles.map((r) => <Badge key={r} tone="green" icon={Briefcase}>{r}</Badge>)}</div>}
           </div>
           <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">

@@ -3,7 +3,7 @@ import { ChevronsLeft, ChevronsRight, LogOut, Settings, Sprout, UserRound, X } f
 import { cn } from "@/utils/cn";
 import { Link, navigate, useLocation } from "@/lib/router";
 import { useQuery } from "@/lib/hooks";
-import { getMe, isAdmin, logout, unreadMessageCount } from "@/lib/api";
+import { getMe, logout, unreadMessageCount } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { NAV_GROUPS, isActive } from "./nav";
 import { Avatar, focusRing } from "./ui";
@@ -90,7 +90,6 @@ function AccountMenu({ collapsed }: { collapsed: boolean }) {
 export function SidebarContent({ collapsed, onToggle, onNavigate, mobile }: { collapsed: boolean; onToggle?: () => void; onNavigate?: () => void; mobile?: boolean }) {
   const { path } = useLocation();
   const { data: unread } = useQuery(() => unreadMessageCount());
-  const { data: isAdminUser } = useQuery(() => isAdmin(), []);
   const t = useT();
   return (
     <div className="flex h-full flex-col bg-white">
@@ -126,7 +125,6 @@ export function SidebarContent({ collapsed, onToggle, onNavigate, mobile }: { co
             {collapsed && gi > 0 && <div className="mx-auto my-3 h-px w-6 bg-[#E9DFDC]" aria-hidden />}
             <ul className="space-y-px" role="list">
               {g.items.map((item) => {
-                if (item.adminOnly && !isAdminUser) return null;
                 const active = isActive(item, path);
                 const count = item.badge === "unreadMessages" ? unread ?? 0 : 0;
                 return (

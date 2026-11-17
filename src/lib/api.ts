@@ -1,18 +1,8 @@
 import { ApiError, exclusiveWrite, getSessionUserId, now, read, setSessionUserId, transact, uid } from "./db";
-import {
-  BUSINESS_TYPES, generateCode, hashOtp, maskEmail, maskPhone, sendOtp, verifyCode,
-  OTP_MAX_ATTEMPTS, OTP_MAX_RESENDS_PER_HOUR, OTP_RESEND_MIN_MS, OTP_TTL_MINUTES,
-  validateEmail, validatePhone, UDYAM_RE,
-} from "./verify";
-import { CATEGORIES, LIMITS, NEED_TYPES, OFFER_TYPES } from "./constants";
-import { getLang, isLang, setVisitorLang, translate, visitorLang } from "./i18n";
-import { isAdminRole } from "./roles";
+import { CATEGORIES, LIMITS } from "./constants";
+import { isLang, setVisitorLang, translate, visitorLang } from "./i18n";
 import type { Key } from "@/locales/en";
-import type {
-  CheckStatus, BusinessEvidence, IdentityProviderConfig, ProviderConfig, TrustTier, Verification, VerifyEventType,
-  VerifyConfig,
-} from "./types";
-import type { PublicVerification } from "./types";
+import { validateListingContent } from "../../server/src/listing/validation";
 import type {
   ActivityEvent, AppNotification, CommitmentProgress, Connection, Conversation, ContextType, DB, Delivery, EventType, Exchange,
   ID, Listing, ListingKind, Message, Milestone, MilestoneStatus, Profile, PublicMember, Review, SavedListing, Skill, User, UserRole, Vars,
@@ -70,14 +60,10 @@ export function isPubliclyVisible(l: Listing) {
   return l.kind === "offer" ? l.status === "active" : l.status === "open" || l.status === "matched";
 }
 
-/** True when a listing needs a moderator before it can be seen by anyone else. */
-export function needsReview(l: Listing) {
-  return l.status === "pending_review";
-}
-
-export function listingReviewReason(l: Listing): { key: Key; vars?: Vars } | null {
-  // reviewReason is always written from a literal key by this file; the cast is safe.
-  return l.reviewReason ? { key: l.reviewReason as Key, vars: l.reviewReasonVars } : null;
+function listingForUi(listing: Listing): Listing {
+  return listing.status === "pending_review" || listing.status === "rejected"
+    ? { ...listing, status: "draft" }
+    : listing;
 }
 
 function blockedBetween(db: DB, a: ID, b: ID) {
@@ -263,14 +249,6 @@ export async function register(input: { email: string; password: string; fullNam
 export async function login(emailRaw: string, password: string) {
   const email = clean(emailRaw, 120).toLowerCase();
   const result = await authenticate("login", { email, password });
-  sessionStorage.setItem(AUTH_TOKEN_KEY, result.token);
-  cacheAuthenticatedUser(result.user);
-}
-
-export async function adminLogin(emailRaw: string, password: string) {
-  const email = clean(emailRaw, 120).toLowerCase();
-  const result = await authenticate("login", { email, password });
-  if (!isAdminRole(result.user.role)) throw new ApiError("auth.notAdmin", "forbidden");
   sessionStorage.setItem(AUTH_TOKEN_KEY, result.token);
   cacheAuthenticatedUser(result.user);
 }
@@ -477,13 +455,6 @@ export function setLanguage(lang: string) {
   setVisitorLang(lang as "en" | "hi" | "mr");
 }
 
-/** Recounts completed exchanges for a member (used to refresh trust indicators). */
-export function recountExchanges(db: DB, userId: ID) {
-  const v = db.verifications.find((x) => x.userId === userId);
-  if (!v) return;
-  v.completedExchanges = db.exchanges.filter((x) => x.status === "completed" && (x.requesterId === userId || x.recipientId === userId)).length;
-}
-
 export function qualifiesForReview(x: Exchange): boolean {
   if (x.status !== "completed" || x.requesterId === x.recipientId || !x.completedAt || !Number.isFinite(Date.parse(x.completedAt))) return false;
   const commitments = x.commitments.filter((c) => c.description.trim());
@@ -541,7 +512,26 @@ export function getReviewContext(exchangeId: ID) {
   };
 }
 
-export async function getPublicProfile(username: string) {
+type PublicProfileReview = Review & {
+  reviewer: PublicMember;
+  verifiedExchange: boolean;
+  canOpenExchange: boolean;
+  reported?: boolean;
+};
+
+type PublicProfileResult = {
+  profile: Profile;
+  isMe: boolean;
+  member: PublicMember;
+  offers: Listing[];
+  needs: Listing[];
+  reviews: PublicProfileReview[];
+  rating: { count: number; average: number | null; distribution?: number[] };
+  completedExchanges: number;
+  blocked?: boolean;
+};
+
+export async function getPublicProfile(username: string): Promise<PublicProfileResult | null> {
   try {
     const response = await fetch(`${API_BASE_URL}/api/profile/${encodeURIComponent(username.toLowerCase())}`);
     if (!response.ok) {
@@ -552,7 +542,10 @@ export async function getPublicProfile(username: string) {
     if (typeof payload !== "object" || payload === null || !("profile" in payload)) {
       throw new ApiError("err.profileNotFound", "invalid_server_response");
     }
-    const result = payload as { profile: Partial<Profile>; member?: { userId?: ID } };
+    const result = payload as Omit<PublicProfileResult, "profile" | "member"> & {
+      profile: Partial<Profile>;
+      member?: Partial<PublicMember>;
+    };
     const source = result.profile;
     const profile: Profile = {
       userId: source.userId ?? result.member?.userId ?? "",
@@ -577,8 +570,17 @@ export async function getPublicProfile(username: string) {
       createdAt: source.createdAt ?? now(),
       updatedAt: source.updatedAt ?? now(),
     };
+    const member: PublicMember = {
+      userId: result.member?.userId ?? profile.userId,
+      fullName: result.member?.fullName ?? profile.fullName,
+      username: result.member?.username ?? profile.username,
+      occupation: result.member?.occupation ?? profile.occupation,
+      avatar: result.member?.avatar ?? profile.avatar,
+      location: result.member?.location ?? profile.location,
+    };
     return {
-      ...payload,
+      ...result,
+      member,
       isMe: profile.userId === getSessionUserId(),
       profile,
     };
@@ -606,7 +608,6 @@ export interface ListingInput {
   tags: string[];
   images: string[];
   /** Author declares this is a registered business/enterprise. */
-  businessClaimed?: boolean;
 }
 
 export type FieldError = { key: Key; vars?: Vars };
@@ -614,16 +615,12 @@ export type FieldError = { key: Key; vars?: Vars };
 export function validateListing(kind: ListingKind, input: ListingInput): Record<string, FieldError> {
   const e: Record<string, FieldError> = {};
   const max = (n: number): FieldError => ({ key: "err.maxLength", vars: { max: n } });
-  const title = input.title.trim();
-  if (title.length < 4) e.title = { key: "err.titleShort" };
-  else if (title.length > LIMITS.title) e.title = max(LIMITS.title);
-  if (!CATEGORIES.includes(input.category as never)) e.category = { key: "err.category" };
-  const types: readonly string[] = kind === "offer" ? OFFER_TYPES : NEED_TYPES;
-  if (!types.includes(input.type)) e.type = { key: "err.type" };
-  if (input.description.trim().length < 20) e.description = { key: "err.descriptionShort" };
-  else if (input.description.trim().length > LIMITS.description) e.description = max(LIMITS.description);
-  if (input.details.trim().length < 3) e.details = { key: kind === "need" ? "err.detailsNeed" : "err.detailsOffer" };
-  else if (input.details.trim().length > LIMITS.details) e.details = max(LIMITS.details);
+  const contentErrors = validateListingContent(input, kind);
+  for (const [field, key] of Object.entries(contentErrors)) {
+    e[field] = key === "err.maxLength"
+      ? max(field === "title" ? LIMITS.title : field === "description" ? LIMITS.description : LIMITS.details)
+      : { key };
+  }
   if (input.exchangePref.trim().length > LIMITS.pref) e.exchangePref = max(LIMITS.pref);
   if (input.location.trim().length > LIMITS.short) e.location = max(LIMITS.short);
   if (input.availability.trim().length > LIMITS.short) e.availability = max(LIMITS.short);
@@ -631,23 +628,6 @@ export function validateListing(kind: ListingKind, input: ListingInput): Record<
   if (input.images.length > LIMITS.imagesPerListing) e.images = { key: "err.imagesMax", vars: { n: LIMITS.imagesPerListing } };
   if (input.images.some((i) => !i.startsWith("data:image/"))) e.images = { key: "err.imagesInvalid" };
   return e;
-}
-
-function normalizeListing(input: ListingInput) {
-  return {
-    title: input.title.trim(),
-    category: input.category,
-    type: input.type,
-    description: input.description.trim(),
-    details: input.details.trim(),
-    exchangePref: input.exchangePref.trim(),
-    location: input.location.trim(),
-    availability: input.availability.trim(),
-    mode: (["", "remote", "in_person", "both"].includes(input.mode) ? input.mode : "") as Listing["mode"],
-    quantity: input.quantity.trim(),
-    tags: [...new Set(input.tags.map((t) => t.trim().toLowerCase()).filter(Boolean))].slice(0, 8).map((t) => t.slice(0, 30)),
-    images: input.images.slice(0, LIMITS.imagesPerListing),
-  };
 }
 
 /** Maps a listing's status to its English status value. */
@@ -693,14 +673,14 @@ export async function updateListing(id: ID, input: ListingInput, publish?: boole
 }
 
 const TRANSITIONS: Record<string, string[]> = {
-  "offer:draft": ["active", "pending_review"],
+  "offer:draft": ["active"],
   "offer:pending_review": ["active", "inactive"],
   "offer:active": ["inactive"],
   "offer:inactive": ["active"],
-  "offer:rejected": ["active", "pending_review", "draft"],
-  "need:draft": ["open", "pending_review"],
+  "offer:rejected": ["active", "draft"],
+  "need:draft": ["open"],
   "need:pending_review": ["open", "paused"],
-  "need:rejected": ["open", "pending_review", "draft"],
+  "need:rejected": ["open", "draft"],
   "need:open": ["matched", "paused", "fulfilled"],
   "need:matched": ["open", "paused", "fulfilled", "in_progress"],
   "need:in_progress": ["fulfilled", "paused", "open"],
@@ -752,7 +732,7 @@ export async function getMyListings(kind: ListingKind) {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!response.ok) throw new ApiError(response.status === 401 ? "err.unauthenticated" : "err.generic", response.status === 401 ? "unauthenticated" : "server_error");
-  return (await response.json()) as Listing[];
+  return ((await response.json()) as Listing[]).map(listingForUi);
 }
 
 export async function getListing(id: ID) {
@@ -760,9 +740,10 @@ export async function getListing(id: ID) {
   if (response.status === 404) return null;
   if (!response.ok) throw new ApiError("err.generic", "server_error");
   const payload = await response.json();
-  const result = payload as { listing: Listing | null; owner: { userId: ID }; isOwner: boolean; unavailable: string | null };
+  const result = payload as { listing: Listing | null; owner: PublicMember; isOwner: boolean; unavailable: string | null };
   return {
     ...result,
+    listing: result.listing ? listingForUi(result.listing) : null,
     isOwner: result.isOwner || result.listing?.ownerId === getSessionUserId(),
   };
 }
@@ -799,755 +780,6 @@ export function responseCount(db: DB, listingId: ID) {
 }
 
 /* ------------------------------------------------------------------ */
-/* verification                                                        */
-/* ------------------------------------------------------------------ */
-
-function findVerification(db: DB, userId: ID): Verification {
-  const v = db.verifications.find((x) => x.userId === userId);
-  if (!v) throw new ApiError("verify.err.recordMissing", "not_found"); // migrate() guarantees this
-  return v;
-}
-
-function touchVerification(v: Verification) {
-  v.updatedAt = now();
-}
-
-function audit(db: DB, userId: ID, actorId: ID, type: VerifyEventType, key: Key, vars?: Vars, body?: string) {
-  db.verifyEvents.push({ id: uid(), userId, actorId, type, key, vars, body, createdAt: now() });
-}
-
-/** Trust tier derived only from checks that actually completed. */
-export function trustOf(v: Verification): TrustTier {
-  if (v.identity.status === "verified") return "identity_verified";
-  if (v.business.status === "verified") return "business_verified";
-  if (v.phone.status === "verified" || v.email.status === "verified") return "contact_verified";
-  return "new";
-}
-
-/** Whether the member completed at least one contact check. */
-export function contactVerified(v: Verification): boolean {
-  return v.phone.status === "verified" || v.email.status === "verified";
-}
-
-/** A required verification step that must genuinely complete before publishing. */
-export interface RequiredStep {
-  channel: "phone" | "email" | "identity" | "business";
-  key: Key;
-  status: CheckStatus;
-  reason?: Key;
-  vars?: Vars;
-  /** Business verification is only mandatory for declared businesses or configured categories. */
-  businessRequired?: boolean;
-}
-
-export interface Eligibility {
-  ok: boolean;
-  required: RequiredStep[];
-  missing: RequiredStep[];
-}
-
-/**
- * Central eligibility check for publishing. One function, used by every publishing pathway
- * (create, publish-draft, set-status, resubmit). Never trust a flag from the browser.
- *
- * Required: phone OTP, email code, identity approval. Business verification is required when the
- * listing declares a business or belongs to a category the platform has marked as requiring it.
- */
-export function verificationEligibility(db: DB, userId: ID, opts: { businessClaimed?: boolean; category?: string } = {}): Eligibility {
-  const v = findVerification(db, userId);
-  const steps: RequiredStep[] = [
-    { channel: "phone", key: "verify.step.phone", status: v.phone.status, reason: (v.phone.note ?? undefined) as Key | undefined, vars: undefined },
-    { channel: "email", key: "verify.step.email", status: v.email.status, reason: (v.email.note ?? undefined) as Key | undefined, vars: undefined },
-    { channel: "identity", key: "verify.step.identity", status: v.identity.status, reason: (v.identity.note ?? undefined) as Key | undefined, vars: undefined },
-  ];
-  const bizRequired = !!opts.businessClaimed || db.verifyConfig.requiredBusinessCategories.includes(opts.category ?? "");
-  steps.push({
-    channel: "business",
-    key: "verify.step.business",
-    status: v.business.status,
-    reason: (v.business.rejectionReason ?? undefined) as Key | undefined,
-    vars: v.business.rejectionVars,
-    businessRequired: bizRequired,
-  });
-  const required = steps.filter((s) => s.channel !== "business" || s.businessRequired);
-  const missing = required.filter((s) => s.status !== "verified");
-  return { ok: missing.length === 0, required, missing };
-}
-
-/**
- * Same eligibility rule the server enforces, evaluated with the listing's own business claim
- * and category. Used by the form UI to mirror the server exactly — the server still re-checks
- * on submission, so a UI bypass cannot publish.
- */
-export function getLocalPublishEligibility(businessClaimed?: boolean, category?: string): Eligibility {
-  const db = read();
-  const me = sessionUser(db);
-  return verificationEligibility(db, me, { businessClaimed, category });
-}
-
-/** Throws unless every mandatory verification step is genuinely completed. */
-export function requireVerified(db: DB, userId: ID, opts: { businessClaimed?: boolean; category?: string } = {}): Eligibility {
-  const e = verificationEligibility(db, userId, opts);
-  if (!e.ok) {
-    // Name the missing steps in the viewer's language so the error is actionable.
-    const steps = e.missing.map((s) => translate(s.key, undefined, getLang())).join(", ");
-    throw new ApiError("verify.err.publishBlocked", "forbidden", { steps });
-  }
-  return e;
-}
-
-/** UI view of the signed-in member's verification record and platform provider state. */
-export function getLocalVerification(): {
-  verification: Verification;
-  email: string;
-  phoneConfigured: boolean;
-  emailConfigured: boolean;
-  contactVerified: boolean;
-  identityAvailable: boolean;
-  identityType: IdentityProviderConfig["type"];
-  requiredBusinessCategories: string[];
-  eligibility: Eligibility;
-  provider: VerifyConfig;
-} {
-  const db = read();
-  const me = sessionUser(db);
-  const v = findVerification(db, me);
-  const u = db.users.find((x) => x.id === me)!;
-  return {
-    verification: v,
-    email: u.email,
-    phoneConfigured: db.verifyConfig.phone.type !== "none",
-    emailConfigured: db.verifyConfig.email.type !== "none",
-    contactVerified: contactVerified(v),
-    identityAvailable: db.verifyConfig.identity.type !== "none",
-    identityType: db.verifyConfig.identity.type,
-    requiredBusinessCategories: db.verifyConfig.requiredBusinessCategories,
-    eligibility: verificationEligibility(db, me, { businessClaimed: false }),
-    provider: db.verifyConfig,
-  };
-}
-
-export function getLocalVerifyEvents(limit = 30) {
-  const db = read();
-  const me = sessionUser(db);
-  return db.verifyEvents.filter((e) => e.userId === me).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
-}
-
-const isExpired = (o: { expiresAt: string }) => Date.now() > Date.parse(o.expiresAt);
-
-/**
- * Starts an OTP round. The code is generated and hashed outside the transaction, stored only
- * as SHA-256(salt + code), and never returned to the caller.
- */
-export async function requestVerificationCodeLocal(channel: "phone" | "email", destinationRaw: string) {
-  const destination = destinationRaw.trim();
-  const lowered = destinationRaw.toLowerCase().trim();
-  const formatErr = channel === "phone" ? validatePhone(destination) : validateEmail(lowered);
-  if (formatErr) throw new ApiError(formatErr, "invalid");
-
-  const prep = transact((db) => {
-    const me = sessionUser(db);
-    const v = findVerification(db, me);
-    const cfg = channel === "phone" ? db.verifyConfig.phone : db.verifyConfig.email;
-    if (cfg.type === "none") throw new ApiError("verify.provider.unconfigured", "unavailable");
-    const c = channel === "phone" ? v.phone : v.email;
-    if (c.status === "verified") throw new ApiError("verify.err.alreadyVerified", "conflict");
-    if (c.lastSentAt && Date.now() - Date.parse(c.lastSentAt) < OTP_RESEND_MIN_MS)
-      throw new ApiError("verify.err.resendWait", "rate_limited", {
-        seconds: Math.ceil((OTP_RESEND_MIN_MS - (Date.now() - Date.parse(c.lastSentAt))) / 1000),
-      });
-    const hourAgo = Date.now() - 3_600_000;
-    const recentSends = db.otps.filter((o) => o.userId === me && o.channel === channel && Date.parse(o.createdAt) > hourAgo).length;
-    if (recentSends >= OTP_MAX_RESENDS_PER_HOUR)
-      throw new ApiError("verify.err.resendLimit", "rate_limited", { max: OTP_MAX_RESENDS_PER_HOUR });
-    return { me, c, masked: channel === "phone" ? maskPhone(destination) : maskEmail(lowered) };
-  });
-
-  const code = generateCode();
-  const salt = uid();
-  const otpHash = await hashOtp(code, salt);
-  const expiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60_000).toISOString();
-  const recordId = uid();
-  const t = now();
-
-  const cfg = getVerificationProvider(channel);
-  const delivered = await sendOtp(cfg, destination, code, channel);
-  // A failed send must never leave a contact looking verified, and must drop the code.
-  const outcome = transact((db) => {
-    const me = sessionUser(db);
-    need(me === prep.me, "err.unauthenticated", "unauthenticated");
-    const v = findVerification(db, me);
-    const c = channel === "phone" ? v.phone : v.email;
-    if (!delivered.ok) {
-      db.otps = db.otps.filter((o) => o.userId !== me || o.channel !== channel);
-      c.status = "pending";
-      c.note = delivered.message;
-      c.lastSentAt = undefined;
-      c.attempts = 0;
-      touchVerification(v);
-      audit(db, me, me, "otp_failed_send", delivered.message, { destination: prep.masked });
-      return { error: new ApiError(delivered.message, "provider_error") };
-    }
-    db.otps = db.otps.filter((o) => o.userId !== me || o.channel !== channel);
-    db.otps.push({ id: recordId, userId: me, channel, destination: lowered, otpHash, salt, expiresAt, attempts: 0, attemptsAt: [], createdAt: t, sentAt: t });
-    c.status = "pending";
-    c.attempts = 0;
-    c.lastSentAt = t;
-    c.masked = prep.masked;
-    c.note = undefined;
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, me, me, "otp_requested", "verify.ev.otpRequested", { destination: prep.masked, ttl: OTP_TTL_MINUTES });
-    return { masked: prep.masked };
-  });
-  if (outcome.error) throw outcome.error;
-
-  // Only the explicitly-labelled demo channel surfaces the code; real gateways never do.
-  const demoCode = cfg.type === "demo" ? code : undefined;
-  return { masked: outcome.masked!, delivered: true, channel, demoCode };
-}
-
-function getVerificationProvider(channel: "phone" | "email"): ProviderConfig {
-  return read().verifyConfig[channel];
-}
-
-/** Verifies a submitted code: expiry, attempt limit and single-use are enforced here. */
-export async function verifyContactCodeLocal(channel: "phone" | "email", codeRaw: string) {
-  const code = codeRaw.trim();
-  if (!code) throw new ApiError("verify.err.codeRequired", "invalid");
-  if (!/^\d{6}$/.test(code)) throw new ApiError("verify.err.codeFormat", "invalid");
-
-  const prep = transact((db) => {
-    const me = sessionUser(db);
-    const v = findVerification(db, me);
-    const c = channel === "phone" ? v.phone : v.email;
-    if (c.status === "verified") throw new ApiError("verify.err.alreadyVerified", "conflict");
-    const record = db.otps.find((o) => o.userId === me && o.channel === channel);
-    if (!record) throw new ApiError("verify.err.noCode", "not_found");
-    if (isExpired(record)) throw new ApiError("verify.err.codeExpired", "expired");
-    return { me, c, record, remaining: Math.max(OTP_MAX_ATTEMPTS - record.attempts, 0) };
-  });
-
-  const ok = await verifyCode(code, prep.record.salt, prep.record.otpHash);
-
-  const outcome = transact((db) => {
-    const me = sessionUser(db);
-    need(me === prep.me, "err.unauthenticated", "unauthenticated");
-    const v = findVerification(db, me);
-    const c = channel === "phone" ? v.phone : v.email;
-    const record = db.otps.find((o) => o.id === prep.record.id && o.userId === me && o.channel === channel);
-    need(record && !isExpired(record), "verify.err.codeExpired", "expired");
-    need(record.attempts < OTP_MAX_ATTEMPTS, "verify.err.attemptsExhausted", "rate_limited");
-    record.attempts++;
-    record!.attemptsAt.push(Date.now());
-    if (!ok) {
-      if (record!.attempts >= OTP_MAX_ATTEMPTS) {
-        db.otps = db.otps.filter((o) => o.id !== prep.record.id);
-        c.status = "rejected";
-        c.note = "verify.err.attemptsExhausted";
-        c.attempts = record!.attempts;
-        touchVerification(v);
-        audit(db, me, me, "otp_attempts_exhausted", "verify.err.attemptsExhausted", { max: OTP_MAX_ATTEMPTS, destination: c.masked });
-      } else {
-        c.attempts = record!.attempts;
-        touchVerification(v);
-        audit(db, me, me, "otp_expired", "verify.ev.attemptFailed", { remaining: Math.max(OTP_MAX_ATTEMPTS - record!.attempts, 0), destination: c.masked });
-      }
-      return { error: new ApiError("verify.err.codeWrong", "invalid", { remaining: Math.max(OTP_MAX_ATTEMPTS - record!.attempts, 0) }) };
-    }
-    db.otps = db.otps.filter((o) => o.id !== prep.record.id);
-    c.status = "verified";
-    c.at = now();
-    c.attempts = record!.attempts;
-    c.note = undefined;
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, me, me, "otp_verified", channel === "phone" ? "verify.ev.phoneVerified" : "verify.ev.emailVerified", { destination: c.masked });
-    return { contact: c };
-  });
-  if (outcome.error) throw outcome.error;
-  return outcome.contact!;
-}
-
-/** Submits business evidence for moderator review. No identity documents are accepted. */
-export function submitBusinessEvidenceLocal(evidence: BusinessEvidence) {
-  const businessName = clean(evidence.businessName, 120);
-  const ownerName = clean(evidence.ownerName, 80);
-  const location = clean(evidence.location, 120);
-  const description = clean(evidence.description, 600);
-  need(businessName.length >= 2, "verify.err.businessName");
-  need(ownerName.length >= 2, "verify.err.ownerName");
-  need(BUSINESS_TYPES.includes(evidence.businessType as never), "verify.err.businessType");
-  need(location.length >= 3, "verify.err.businessLocation");
-  need(description.length >= 10, "verify.err.businessDesc");
-  const udyam = clean(evidence.udyamNumber, 10).replace(/[^0-9]/g, "");
-  if (udyam) need(UDYAM_RE.test(udyam), "verify.err.udyamFormat");
-  const docs = evidence.documents
-    .map((d) => ({ title: clean(d.title, 80), type: d.type, value: clean(d.value, 4000) }))
-    .filter((d) => d.title)
-    .slice(0, 6);
-  return transact((db) => {
-    const me = sessionUser(db);
-    const v = findVerification(db, me);
-    if (v.business.status === "verified") throw new ApiError("verify.err.businessVerified", "conflict");
-    v.business = {
-      status: "pending",
-      submittedAt: now(),
-      reviewedAt: undefined,
-      reviewedBy: undefined,
-      rejectionReason: undefined,
-      rejectionVars: undefined,
-      evidence: { businessType: evidence.businessType, businessName, ownerName, udyamNumber: udyam, location, description, documents: docs },
-    };
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, me, me, "business_submitted", "verify.ev.businessSubmitted", { businessType: evidence.businessType });
-    notify(db, me, "verification", "notif.verificationReceived", { type: "business" }, "/verification");
-    return v.business;
-  });
-}
-
-/** Own submission for the owner; the pending queue for reviewers. */
-export function getBusinessEvidenceLocal() {
-  const db = read();
-  const me = sessionUser(db);
-  const u = db.users.find((x) => x.id === me)!;
-  if (u.role !== "admin") {
-    const v = findVerification(db, me);
-    return {
-      reviewer: false as const,
-      evidence: v.business.evidence ?? null,
-      status: v.business.status,
-      submittedAt: v.business.submittedAt,
-      rejectionReason: v.business.rejectionReason,
-      rejectionVars: v.business.rejectionVars,
-      reviewedAt: v.business.reviewedAt,
-    };
-  }
-  const submissions = db.verifications
-    .filter((x) => x.business.status !== "not_started" && x.business.evidence)
-    .map((x) => {
-      const owner = db.profiles.find((p) => p.userId === x.userId);
-      return {
-        userId: x.userId,
-        status: x.business.status,
-        submittedAt: x.business.submittedAt,
-        evidence: x.business.evidence,
-        rejectionReason: x.business.rejectionReason,
-        rejectionVars: x.business.rejectionVars,
-        ownerName: owner?.fullName ?? "—",
-      };
-    })
-    .filter((s) => s.status === "pending")
-    .sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""));
-  return { reviewer: true as const, submissions };
-}
-
-function reviewerOnly(db: DB): ID {
-  return adminOnly(db);
-}
-
-/** Reviewer action on submitted business evidence. */
-export function reviewBusinessEvidenceLocal(userId: ID, decision: "approve" | "reject", reason?: string) {
-  const reasonText = reason?.trim() ?? "";
-  if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
-  return transact((db) => {
-    const me = reviewerOnly(db);
-    const v = findVerification(db, userId);
-    need(v.business.status === "pending", "verify.err.notPending", "conflict");
-    v.business.status = decision === "approve" ? "verified" : "rejected";
-    v.business.reviewedAt = now();
-    v.business.reviewedBy = me;
-    if (decision === "reject") {
-      v.business.rejectionReason = "verify.business.rejected";
-      v.business.rejectionVars = { reason: reasonText };
-      v.business.evidence = undefined; // evidence not retained for rejected submissions
-    }
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, userId, me, "business_reviewed", decision === "approve" ? "verify.ev.businessApproved" : "verify.ev.businessRejected", {
-      businessType: v.business.evidence?.businessType ?? "other",
-      reason: reasonText,
-    });
-    notify(db, userId, "verification", decision === "approve" ? "community.verificationApproved" : "notif.verificationRejected", { type: "business", reason: reasonText }, "/verification");
-    return v.business.status;
-  });
-}
-
-/**
- * Identity verification submission.
- *
- * The member declares who they are with a masked reference to a government identity document.
- * Nothing sensitive is stored: only the name, a masked reference, and a note. Completion requires
- * a genuine reviewer approval — a submitted form never becomes a verified badge.
- */
-export function submitIdentityVerificationLocal(input: { fullName: string; idReference: string; note: string }) {
-  const fullName = clean(input.fullName, 80);
-  const idReference = clean(input.idReference, 40);
-  const note = clean(input.note, 500);
-  need(fullName.length >= 2, "verify.err.identityName");
-  need(idReference.length >= 3, "verify.err.identityReference");
-  need(note.length >= 10, "verify.err.identityNote");
-  return transact((db) => {
-    const me = sessionUser(db);
-    const v = findVerification(db, me);
-    const cfg = db.verifyConfig.identity;
-    need(cfg.type !== "none", "verify.err.identityUnavailable");
-    if (v.identity.status === "verified") throw new ApiError("verify.err.identityVerified", "conflict");
-    v.identity = {
-      status: "pending",
-      note: undefined,
-      submission: { fullName, idReference: maskIdentityReference(idReference), note },
-      submittedAt: now(),
-      reviewedAt: undefined,
-      reviewedBy: undefined,
-      rejectionReason: undefined,
-      rejectionVars: undefined,
-    };
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, me, me, "identity_submitted", "verify.ev.identitySubmitted", { provider: cfg.label });
-    notify(db, me, "verification", "notif.verificationReceived", { type: "identity" }, "/verification");
-    return v.identity;
-  });
-}
-
-/** Masks an identity reference so only the tail is retained. */
-function maskIdentityReference(ref: string) {
-  const t = ref.trim();
-  if (t.length <= 4) return "****";
-  return `${t.slice(0, 2)}***${t.slice(-4)}`;
-}
-
-/** Reviewer action on a submitted identity declaration. */
-export function reviewIdentityVerificationLocal(userId: ID, decision: "approve" | "reject", reason?: string) {
-  const reasonText = reason?.trim() ?? "";
-  if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
-  return transact((db) => {
-    const me = reviewerOnly(db);
-    const v = findVerification(db, userId);
-    need(v.identity.status === "pending", "verify.err.identityNotPending", "conflict");
-    v.identity.status = decision === "approve" ? "verified" : "rejected";
-    v.identity.reviewedAt = now();
-    v.identity.reviewedBy = me;
-    if (decision === "approve") {
-      v.identity.at = now();
-      v.identity.note = undefined;
-      v.identity.rejectionReason = undefined;
-      v.identity.rejectionVars = undefined;
-    } else {
-      v.identity.rejectionReason = "verify.identity.rejected";
-      v.identity.rejectionVars = { reason: reasonText };
-    }
-    v.trust = trustOf(v);
-    touchVerification(v);
-    audit(db, userId, me, "identity_reviewed", decision === "approve" ? "verify.ev.identityApproved" : "verify.ev.identityRejected", {
-      provider: db.verifyConfig.identity.label,
-      reason: reasonText,
-    });
-    notify(db, userId, "verification", decision === "approve" ? "community.verificationApproved" : "notif.verificationRejected", { type: "identity", reason: reasonText }, "/verification");
-    return v.identity.status;
-  });
-}
-
-/** Own identity declaration for the owner; the pending queue for reviewers. */
-export function getIdentityEvidenceLocal() {
-  const db = read();
-  const me = sessionUser(db);
-  const u = db.users.find((x) => x.id === me)!;
-  if (u.role !== "admin") {
-    const v = findVerification(db, me);
-    return {
-      reviewer: false as const,
-      submission: v.identity.submission ?? null,
-      status: v.identity.status,
-      rejectionReason: v.identity.rejectionReason,
-      rejectionVars: v.identity.rejectionVars,
-      reviewedAt: v.identity.reviewedAt,
-    };
-  }
-  const submissions = db.verifications
-    .filter((x) => x.identity.status === "pending" && x.identity.submission)
-    .map((x) => {
-      const owner = db.profiles.find((p) => p.userId === x.userId);
-      return {
-        userId: x.userId,
-        status: x.identity.status,
-        submittedAt: x.identity.submittedAt,
-        submission: x.identity.submission,
-        ownerName: owner?.fullName ?? "—",
-      };
-    })
-    .sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""));
-  return { reviewer: true as const, submissions };
-}
-
-/** Privacy-safe trust indicators for a member — never contact details or evidence. */
-export function getLocalPublicVerification(userId: ID): PublicVerification {
-  const db = read();
-  const v = db.verifications.find((x) => x.userId === userId);
-  if (!v) return { phoneVerified: false, emailVerified: false, businessVerified: false, identityVerified: false, completedExchanges: 0, trust: "new" };
-  return {
-    phoneVerified: v.phone.status === "verified",
-    emailVerified: v.email.status === "verified",
-    businessVerified: v.business.status === "verified",
-    identityVerified: v.identity.status === "verified",
-    completedExchanges: v.completedExchanges,
-    trust: trustOf(v),
-  };
-}
-
-/** Platform provider configuration. A clearly-labelled configuration capability, logged. */
-export function updateProviderConfigLocal(channel: "phone" | "email", config: Partial<ProviderConfig>) {
-  const type = config.type ?? "none";
-  need(["none", "http", "demo"].includes(type), "verify.err.providerType");
-  if (type === "http") {
-    need(typeof config.endpoint === "string" && config.endpoint.length > 0, "verify.err.providerEndpoint");
-    need((config.apiToken ?? "").length > 0, "verify.err.providerToken");
-  }
-  return transact((db) => {
-    const me = sessionUser(db);
-    db.verifyConfig = {
-      ...db.verifyConfig,
-      [channel]: {
-        channel,
-        type: type as ProviderConfig["type"],
-        endpoint: clean(config.endpoint ?? "", 200),
-        apiToken: clean(config.apiToken ?? "", 200),
-        label: clean(config.label ?? "", 60) || (type === "demo" ? "Demo" : "HTTP"),
-      },
-    };
-    audit(db, me, me, "role_changed", "verify.ev.providerChanged", { channel, type });
-    return db.verifyConfig[channel];
-  });
-}
-
-/**
- * Role checks. Only the administrator role (provisioned from secure build-time credentials)
- * can review submissions. Ordinary users can never grant themselves this role.
- */
-export function isAdmin() {
-  const db = read();
-  const me = sessionUser(db);
-  return db.users.find((x) => x.id === me)?.role === "admin";
-}
-
-/** Alias kept for the verification service, which gates on the reviewer role. */
-export function isLocalReviewer() {
-  return isAdmin();
-}
-
-/** Enforces that only an administrator may perform a review action. */
-function adminOnly(db: DB): ID {
-  const me = sessionUser(db);
-  need(db.users.find((x) => x.id === me)!.role === "admin", "verify.err.reviewerOnly", "forbidden");
-  return me;
-}
-
-/**
- * Admin review queue: every pending submission, business and identity, in one place.
- * Requires the admin role; throws for ordinary users.
- */
-export function getAdminReviewQueueLocal() {
-  const db = read();
-  adminOnly(db);
-  const business = db.verifications
-    .filter((v) => ["pending", "verified", "rejected"].includes(v.business.status) && (v.business.submittedAt || v.business.reviewedAt || v.business.evidence))
-    .map((v) => {
-      const p = db.profiles.find((pr) => pr.userId === v.userId);
-      return {
-        userId: v.userId,
-        type: "business" as const,
-        submittedAt: v.business.submittedAt ?? v.business.reviewedAt,
-        reviewedAt: v.business.reviewedAt,
-        status: v.business.status,
-        ownerName: p?.fullName ?? "—",
-        ownerUsername: p?.username ?? "",
-        evidence: v.business.evidence,
-        rejectionReason: v.business.rejectionVars?.reason ? String(v.business.rejectionVars.reason) : undefined,
-      };
-    });
-  const identity = db.verifications
-    .filter((v) => ["pending", "verified", "rejected"].includes(v.identity.status) && (v.identity.submittedAt || v.identity.reviewedAt || v.identity.submission))
-    .map((v) => {
-      const p = db.profiles.find((pr) => pr.userId === v.userId);
-      return {
-        userId: v.userId,
-        type: "identity" as const,
-        submittedAt: v.identity.submittedAt ?? v.identity.reviewedAt,
-        reviewedAt: v.identity.reviewedAt,
-        status: v.identity.status,
-        ownerName: p?.fullName ?? "—",
-        ownerUsername: p?.username ?? "",
-        submission: v.identity.submission,
-        rejectionReason: v.identity.rejectionVars?.reason ? String(v.identity.rejectionVars.reason) : undefined,
-      };
-    });
-  const all = [...business, ...identity].sort((a, b) => (b.submittedAt ?? "").localeCompare(a.submittedAt ?? ""));
-  const pending = all.filter((x) => x.status === "pending");
-  return { pending, all };
-}
-
-/** Admin overview statistics calculated from real records. */
-export function getLocalAdminOverview() {
-  const db = read();
-  adminOnly(db);
-  const totalUsers = db.users.length;
-  const pending = db.verifications.filter(
-    (v) => (v.business.status === "pending" && v.business.evidence) || (v.identity.status === "pending" && v.identity.submission),
-  ).length;
-  const approved = db.verifications.filter(
-    (v) => (v.business.status === "verified") || (v.identity.status === "verified"),
-  ).length;
-  const rejected = db.verifications.filter(
-    (v) => (v.business.status === "rejected") || (v.identity.status === "rejected"),
-  ).length;
-  const bizPending = db.verifications.filter((v) => v.business.status === "pending" && v.business.evidence).length;
-  const idPending = db.verifications.filter((v) => v.identity.status === "pending" && v.identity.submission).length;
-  const totalListings = db.listings.filter((l) => !l.deletedAt).length;
-  const activeExchanges = db.exchanges.filter((x) => x.status === "active").length;
-  const completedExchanges = db.exchanges.filter((x) => x.status === "completed").length;
-  return { totalUsers, pending, approved, rejected, bizPending, idPending, totalListings, activeExchanges, completedExchanges };
-}
-
-/** Admin user list — no passwords, hashes, tokens, or OTPs. */
-export function getLocalAdminUsers(query = "", limit = 100) {
-  const db = read();
-  adminOnly(db);
-  const q = query.trim().toLowerCase();
-  const users = db.users
-    .map((u) => {
-      const p = db.profiles.find((x) => x.userId === u.id);
-      const v = db.verifications.find((x) => x.userId === u.id);
-      const listings = db.listings.filter((l) => l.ownerId === u.id && !l.deletedAt);
-      return {
-        userId: u.id,
-        fullName: p?.fullName ?? "—",
-        username: p?.username ?? "",
-        email: u.email,
-        role: u.role,
-        status: u.status,
-        createdAt: u.createdAt,
-        phoneVerified: v?.phone.status === "verified",
-        emailVerified: v?.email.status === "verified",
-        businessVerified: v?.business.status === "verified",
-        identityVerified: v?.identity.status === "verified",
-        trust: v ? trustOf(v) : "new" as const,
-        listings: listings.length,
-        activeOffers: listings.filter((l) => l.kind === "offer" && l.status === "active").length,
-        openNeeds: listings.filter((l) => l.kind === "need" && l.status === "open").length,
-      };
-    })
-    .filter((u) => !q || u.fullName.toLowerCase().includes(q) || u.username.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, limit);
-  return { users, total: db.users.length };
-}
-
-/** Suspend or activate an account (admin only). Logged. */
-export function setLocalAccountStatus(userId: ID, status: "active" | "suspended", reason?: string) {
-  const reasonText = reason?.trim() ?? "";
-  if (status === "suspended") need(reasonText.length >= 5, "verify.err.rejectReason");
-  return transact((db) => {
-    const me = adminOnly(db);
-    const u = db.users.find((x) => x.id === userId);
-    need(u, "err.memberGone", "not_found");
-    need(u!.role !== "admin", "verify.err.cannotSuspendAdmin", "forbidden");
-    need(u!.status !== status, "verify.err.statusUnchanged", "conflict");
-    u!.status = status;
-    audit(db, userId, me, "role_changed", status === "suspended" ? "verify.ev.accountSuspended" : "verify.ev.accountActivated", { reason: reasonText });
-    return u!.status;
-  });
-}
-
-/** Full review history for the admin dashboard (approved and rejected). */
-export function getAdminReviewHistoryLocal(limit = 50) {
-  const db = read();
-  adminOnly(db);
-  return db.verifyEvents
-    .filter((e) => ["business_reviewed", "identity_reviewed"].includes(e.type))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .slice(0, limit)
-    .map((e) => {
-      const owner = db.profiles.find((p) => p.userId === e.userId);
-      return { ...e, ownerName: owner?.fullName ?? "—" };
-    });
-}
-
-/* ------------------------------------------------------------------ */
-/* listing moderation                                                  */
-/* ------------------------------------------------------------------ */
-
-/** Listings awaiting moderation (reviewers only). */
-export function getListingReviewQueueLocal() {
-  const db = read();
-  reviewerOnly(db);
-  return db.listings
-    .filter((l) => !l.deletedAt && l.status === "pending_review")
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-    .map((l) => {
-      const p = db.profiles.find((x) => x.userId === l.ownerId);
-      const v = findVerification(db, l.ownerId);
-      return {
-        listing: l,
-        ownerName: p?.fullName ?? "—",
-        ownerUsername: p?.username ?? "",
-        contactVerified: contactVerified(v),
-        businessVerified: v.business.status === "verified",
-      };
-    });
-}
-
-/** Reviewer action on a listing awaiting moderation. */
-export function reviewListingLocal(listingId: ID, decision: "approve" | "reject", reason?: string) {
-  const reasonText = reason?.trim() ?? "";
-  if (decision === "reject") need(reasonText.length >= 5, "verify.err.rejectReason");
-  return transact((db) => {
-    const me = reviewerOnly(db);
-    const l = db.listings.find((x) => x.id === listingId && !x.deletedAt);
-    need(l && l.status === "pending_review", "verify.err.notPendingReview", "conflict");
-    // A moderator cannot publish a listing whose owner is not fully verified.
-    if (decision === "approve") requireVerified(db, l.ownerId, { businessClaimed: l.businessClaimed, category: l.category });
-    l.status = decision === "approve" ? (l.kind === "offer" ? "active" : "open") : "rejected";
-    l.reviewedBy = me;
-    l.reviewedAt = now();
-    l.updatedAt = now();
-    if (decision === "approve") {
-      l.reviewReason = undefined;
-      l.reviewReasonVars = undefined;
-    } else {
-      l.reviewReason = "verify.listing.rejected";
-      l.reviewReasonVars = { reason: reasonText };
-    }
-    const v = findVerification(db, l.ownerId);
-    const ownerName = db.profiles.find((p) => p.userId === l.ownerId)?.fullName ?? "—";
-    audit(
-      db, l.ownerId, me, decision === "approve" ? "listing_approved" : "listing_rejected",
-      decision === "approve" ? "verify.ev.listingApproved" : "verify.ev.listingRejected",
-      { title: l.title, ownerName, reason: reasonText },
-    );
-    touchVerification(v);
-    return l.status;
-  });
-}
-
-/** Owner action after a rejection; re-runs the policy so resubmission is reviewed again. */
-export async function resubmitListing(listingId: ID) {
-  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
-  const response = await fetch(`${API_BASE_URL}/api/listing/${encodeURIComponent(listingId)}/resubmit`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
-    throw new ApiError(body.message ?? "err.generic", body.code ?? "server_error", body.vars);
-  }
-  return payload as Listing;
-}
-
-/* ------------------------------------------------------------------ */
 /* saved listings                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -1571,95 +803,6 @@ export function toggleSave(listingId: ID): boolean {
     db.saved.push({ id: uid(), userId: me, listingId, createdAt: now() });
     return true;
   });
-}
-
-export {
-  getVerification,
-  getPublicVerification,
-  isReviewer,
-  getPublishEligibility,
-  getVerifyEvents,
-  requestVerificationCode,
-  verifyContactCode,
-  submitBusinessEvidence,
-  getBusinessEvidence,
-  reviewBusinessEvidence,
-  submitIdentityVerification,
-  getIdentityEvidence,
-  reviewIdentityVerification,
-  updateProviderConfig,
-  getAdminReviewQueue,
-  getAdminReviewHistory,
-  getListingReviewQueue,
-  reviewListing,
-} from "./verification-api";
-
-async function getAdminBackend<T>(path: string, method = "GET", body?: unknown): Promise<T> {
-  const token = sessionStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) throw new ApiError("err.unauthenticated", "unauthenticated");
-  let response: Response;
-  try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  } catch {
-    throw new ApiError("err.generic", "network_error");
-  }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const body = typeof payload === "object" && payload !== null ? payload as { code?: string; message?: string; vars?: Record<string, string | number> } : {};
-    throw new ApiError(body.message ?? "err.generic", body.code ?? "server_error", body.vars);
-  }
-  return payload as T;
-}
-
-export async function getAdminOverview() {
-  const verification = await getAdminBackend<Omit<ReturnType<typeof getLocalAdminOverview>, "activeExchanges" | "completedExchanges">>(
-    "/api/verification/admin/overview",
-  );
-  const db = read();
-  return {
-    ...verification,
-    activeExchanges: db.exchanges.filter((exchange) => exchange.status === "active").length,
-    completedExchanges: db.exchanges.filter((exchange) => exchange.status === "completed").length,
-  };
-}
-
-export async function getAdminUsers(query = "", limit = 100) {
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
-  return getAdminBackend<{
-    users: Array<{
-      userId: ID;
-      fullName: string;
-      username: string;
-      email: string;
-      role: UserRole;
-      status: "active" | "suspended";
-      createdAt: string;
-      phoneVerified: boolean;
-      emailVerified: boolean;
-      businessVerified: boolean;
-      identityVerified: boolean;
-      trust: TrustTier;
-      listings: number;
-      activeOffers: number;
-      openNeeds: number;
-    }>;
-    total: number;
-  }>(`/api/verification/admin/users?${params.toString()}`);
-}
-
-export async function setAccountStatus(userId: ID, status: "active" | "suspended", reason?: string) {
-  return getAdminBackend<{ status: "active" | "suspended" }>(
-    `/api/verification/admin/users/${encodeURIComponent(userId)}/status`,
-    "PATCH",
-    { status, reason },
-  );
 }
 
 export function getSaved() {

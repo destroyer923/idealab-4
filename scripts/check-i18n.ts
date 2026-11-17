@@ -15,7 +15,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import en from "../src/locales/en";
-import { BUSINESS_TYPES, PHONE_RE } from "../src/lib/verify";
 import hi from "../src/locales/hi";
 import mr from "../src/locales/mr";
 import * as C from "../src/lib/constants";
@@ -77,13 +76,10 @@ C.SKILL_LEVELS.forEach((v) => need(`level.${v}`));
 C.MILESTONE_STATUSES.forEach((v) => { need(`ms.s.${v}`); need(`ev.ms.${v}`); });
 C.OFFER_STATUSES.forEach((v) => need(`status.offer.${v}`));
 C.NEED_STATUSES.forEach((v) => need(`status.need.${v}`));
-BUSINESS_TYPES.forEach((v) => need(`verify.bizType.${v}`));
-["phone", "email"].forEach((c) => { need(`verify.providerChannel.${c}`); need(`verify.providerType.${c}`); });
-["not_started", "pending", "verified", "rejected", "unavailable"].forEach((v) => need(`verify.st.${v}`));
 ["requests", "active", "completed", "history"].forEach((v) => { need(`x.tab.${v}`); need(`x.empty.${v}.title`); need(`x.empty.${v}.body`); });
 ["all", "incoming", "outgoing", "awaiting", "declined", "withdrawn", "cancelled"].forEach((v) => need(`x.f.${v}`));
 ["active", "awaiting", "completed", "cancelled"].forEach((v) => { need(`co.tab.${v}`); need(`co.empty.${v}.title`); need(`co.empty.${v}.body`); });
-["offer:inactive", "need:paused", "need:fulfilled", "offer:pending_review", "need:pending_review", "offer:rejected", "need:rejected"].forEach((v) =>
+["offer:inactive", "need:paused", "need:fulfilled"].forEach((v) =>
   ["title", "body", "label"].forEach((p) => need(`ml.c.${v}.${p}`))
 );
 ["active", "inactive"].forEach((v) => need(`ml.tab.${v}`));
@@ -91,8 +87,6 @@ BUSINESS_TYPES.forEach((v) => need(`verify.bizType.${v}`));
 [1, 2, 3, 4, 5].forEach((v) => need(`ui.star.${v}`));
 ["bio", "location", "skills", "portfolio"].forEach((v) => need(`pe.vis.${v}`));
 ["in_progress", "not_started"].forEach((v) => need(`ev.progress.${v}`));
-["business", "identity"].forEach((v) => need(`notif.type.${v}`));
-
 // 6. plurals
 for (const f of files) for (const m of readFileSync(f, "utf8").matchAll(/tn\("([a-z.]+)"/g)) { need(`${m[1]}.one`); need(`${m[1]}.other`); }
 

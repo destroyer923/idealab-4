@@ -7,7 +7,7 @@ import { Link } from "@/lib/router";
 import { ReviewForm } from "./ReviewForm";
 import { Avatar, Button, EmptyState, ErrorState, Field, Modal, SectionTitle, Select, Spinner, Stars, Textarea, errMsg, toast } from "./ui";
 
-type MemberProfile = NonNullable<ReturnType<typeof getPublicProfile>>;
+type MemberProfile = NonNullable<Awaited<ReturnType<typeof getPublicProfile>>>;
 
 export function ProfileReviews({ member, reviews, rating, isMe }: Pick<MemberProfile, "member" | "reviews" | "rating" | "isMe">) {
   const { t, tn, num, ago } = useI18n();

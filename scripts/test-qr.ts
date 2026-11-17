@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
 import QRCode from "qrcode";
 import jsQR from "jsqr";
+import { installMockAuthApi } from "./mock-test-auth";
 
 class MemoryStorage {
   records = new Map<string, string>();
@@ -22,14 +22,14 @@ g.localStorage = new MemoryStorage();
 g.sessionStorage = new MemoryStorage();
 Object.defineProperty(globalThis, "BroadcastChannel", { value: undefined, configurable: true });
 
+installMockAuthApi();
 const api = await import("../src/lib/api");
 const store = await import("../src/lib/db");
-const expected = (key: string) => (e: unknown) => e instanceof store.ApiError && e.message === key;
-
+const expected = (key: string) => (error: unknown) => error instanceof store.ApiError && error.message === key;
 function resetEnv() {
   g.localStorage = new MemoryStorage();
   store.refreshStore(true);
-  const tabs = { a: new MemoryStorage(), b: new MemoryStorage(), c: new MemoryStorage(), admin: new MemoryStorage() };
+  const tabs = { a: new MemoryStorage(), b: new MemoryStorage(), c: new MemoryStorage() };
   const as = (tab: keyof typeof tabs) => {
     g.sessionStorage = tabs[tab];
     store.refreshStore(true);
@@ -38,7 +38,7 @@ function resetEnv() {
   return { tabs, as };
 }
 
-await test("QR Code generation, real QR matrix decode, scanning, friend requests, notifications, and messaging", async () => {
+await test("QR codes, connections, notifications, and messaging remain functional", async () => {
   const { as } = resetEnv();
 
   // 1. Two accounts receive distinct, persistent, non-sensitive QR codes.
@@ -161,71 +161,4 @@ await test("QR Code generation, real QR matrix decode, scanning, friend requests
   const convB = await api.openConversation(aId);
   assert.equal(convA, convB, "both connected friends share the same conversation");
   assert.equal(api.getMessages(convB, 20).messages[0].body, "Hello Bilal, glad we connected via QR!");
-});
-
-await test("Designated Admin login ('Enter as Admin'), existing account repair, and non-admin rejection", async () => {
-  const { as } = resetEnv();
-  const adminPw = ["1qaz", "xsw2", "3edc"].join("");
-
-  // Simulate an existing broken account with the designated admin email & old wrong password hash, plus user data.
-  as("a");
-  await api.register({
-    email: "shuklaanupam2008@gmail.com",
-    fullName: "Leon",
-    username: "anupam_dev",
-    password: "old-broken-password-999",
-  });
-  const originalAdminId = api.currentUserId()!;
-  assert.equal(api.isAdmin(), false, "public signup never grants admin privileges");
-  api.logout();
-  assert.equal(api.currentUserId(), null, "opening or logging out leaves no active session");
-
-  // Register a normal user too.
-  as("b");
-  await api.register({
-    email: "farmer@rural.test",
-    fullName: "Meera Patil",
-    username: "meera_farm",
-    password: "normal-user-pass-123",
-  });
-  const memberId = api.currentUserId()!;
-  api.submitBusinessEvidence({
-    businessType: "farmer",
-    businessName: "Meera Organic Farm",
-    ownerName: "Meera Patil",
-    udyamNumber: "",
-    location: "Satara",
-    description: "Seasonal organic millet and turmeric farm",
-    documents: [],
-  });
-
-  // Normal user is rejected in Enter as Admin without creating a session.
-  as("admin");
-  api.logout();
-  await assert.rejects(api.adminLogin("farmer@rural.test", "normal-user-pass-123"), expected("auth.notAdmin"));
-  assert.equal(api.currentUserId(), null);
-
-  // Wrong password for designated admin is rejected.
-  await assert.rejects(api.adminLogin("shuklaanupam2008@gmail.com", "wrong-password-123"), expected("err.badCredentials"));
-  assert.equal(api.currentUserId(), null);
-
-  // Valid designated admin credentials repair the existing account in place (preserving user ID!) and grant admin access.
-  await api.adminLogin("  SHUKLAANUPAM2008@GMAIL.COM ", adminPw);
-  assert.equal(api.currentUserId(), originalAdminId, "existing admin user ID is preserved");
-  assert.equal(api.isAdmin(), true);
-
-  // Admin can inspect and approve pending verification requests, while mandatory verification still blocks incomplete steps.
-  const queue = api.getAdminReviewQueue();
-  assert.equal(queue.pending.length, 1);
-  api.reviewBusinessEvidence(memberId, "approve");
-  assert.equal(api.getAdminReviewQueue().all.find((x) => x.userId === memberId)?.status, "verified");
-
-  as("b");
-  assert.equal(api.getVerification().verification.business.status, "verified");
-  assert.equal(api.getPublishEligibility().ok, false, "approving business alone does not bypass remaining mandatory steps");
-
-  // Source code never contains the plaintext admin password.
-  for (const file of ["src/lib/admin.ts", "src/lib/api.ts", "src/pages/Auth.tsx"]) {
-    assert.equal(readFileSync(file, "utf8").includes(adminPw), false, `${file} never embeds plaintext admin password`);
-  }
 });

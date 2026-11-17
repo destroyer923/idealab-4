@@ -5,7 +5,6 @@ import { resolveQrPayload } from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
 import { L, useI18n } from "@/lib/i18n";
 import { useLocation } from "@/lib/router";
-import { TrustBadges } from "@/components/trust";
 import { ConnectionActions, ConnectionsDirectory } from "@/components/ConnectionActions";
 import { MessageButton } from "@/components/listing";
 import { Avatar, Badge, Button, Card, ErrorState, Field, Input, LinkButton, PageHeader, errMsg } from "@/components/ui";
@@ -234,9 +233,6 @@ export default function ScanQrPage() {
                     <MapPin className="h-3.5 w-3.5" aria-hidden />
                     {resolved.data.member.location}
                   </p>
-                )}
-                {resolved.data.member.verification && (
-                  <TrustBadges v={resolved.data.member.verification} className="mt-2" />
                 )}
               </div>
             </div>

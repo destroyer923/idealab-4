@@ -54,7 +54,7 @@ try {
   await go(a, "/");
   await expect(a.getByRole("heading", { name: "Welcome back" })).toBeVisible();
   assert.equal(await api(a, "currentUserId"), null);
-  pass("opening the app does not provision or sign in as administrator");
+  pass("opening the app does not provision or sign in as another user");
   await signup(a, "Asha Kulkarni", "asha_test", "asha@test.example");
   const aid = await api(a, "currentUserId");
   await go(b, "/");

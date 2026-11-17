@@ -32,8 +32,7 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const tabA = await context.newPage();
   const tabB = await context.newPage();
-  const tabAdmin = await context.newPage();
-  for (const p of [tabA, tabB, tabAdmin]) p.on("pageerror", (e) => pageErrors.push(e.message));
+  for (const p of [tabA, tabB]) p.on("pageerror", (e) => pageErrors.push(e.message));
 
   const go = async (page, route) => {
     await page.bringToFront();
@@ -42,7 +41,7 @@ try {
   const logout = async (page) => {
     await page.getByRole("button", { name: /Account menu for/ }).click();
     await page.getByRole("menuitem", { name: "Log out", exact: true }).click();
-    await expect(page.getByRole("tab", { name: "Enter as Admin", exact: true })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "Sign in", exact: true })).toBeVisible();
   };
   const signup = async (page, fullName, username, email) => {
     await page.getByRole("tab", { name: "Create account", exact: true }).click();
@@ -58,8 +57,8 @@ try {
   await go(tabA, "/");
   await expect(tabA.getByRole("tab", { name: "Sign in", exact: true })).toBeVisible();
   await expect(tabA.getByRole("tab", { name: "Create account", exact: true })).toBeVisible();
-  await expect(tabA.getByRole("tab", { name: "Enter as Admin", exact: true })).toBeVisible();
-  pass("initial visitor starts unauthenticated with Sign in, Create account, and Enter as Admin options");
+  await expect(tabA.getByRole("tab", { name: "Enter as Admin", exact: true })).toHaveCount(0);
+  pass("initial visitor starts unauthenticated with normal sign-in and signup options only");
 
   // 2. Register two ordinary accounts and verify sidebar items.
   await signup(tabA, "Asha Kulkarni", "asha_qr_ui", "asha@ui.test");
@@ -68,7 +67,6 @@ try {
   await expect(tabA.getByRole("link", { name: "Admin", exact: true })).toHaveCount(0);
 
   await go(tabB, "/");
-  await logout(tabB);
   await signup(tabB, "Bilal Shaikh", "bilal_qr_ui", "bilal@ui.test");
   await expect(tabB.getByRole("link", { name: "Admin", exact: true })).toHaveCount(0);
   pass("My Activity sidebar shows QR Code and Scan QR Code, and hides Admin from ordinary users");
@@ -146,25 +144,8 @@ try {
   await expect(tabA.getByText("Connected through QR! Ready to exchange.")).toBeVisible();
   pass("friend request, notification, acceptance, and connected messaging work end-to-end");
 
-  // 6. Enter as Admin: reject normal user, authenticate designated admin, show Admin sidebar & dashboard.
-  await go(tabAdmin, "/");
-  await logout(tabAdmin);
-  await tabAdmin.getByRole("tab", { name: "Enter as Admin", exact: true }).click();
-  await tabAdmin.getByLabel("Email", { exact: false }).fill("asha@ui.test");
-  await tabAdmin.getByLabel("Password", { exact: false }).fill("browser-test-pass-123");
-  await tabAdmin.getByRole("button", { name: "Enter as Admin", exact: true }).click();
-  await expect(tabAdmin.getByRole("alert").filter({ hasText: "Access denied: This account is not an administrator." })).toBeVisible();
-
-  await tabAdmin.getByLabel("Email", { exact: false }).fill("shuklaanupam2008@gmail.com");
-  await tabAdmin.getByLabel("Password", { exact: false }).fill(["1qaz", "xsw2", "3edc"].join(""));
-  await tabAdmin.getByRole("button", { name: "Enter as Admin", exact: true }).click();
-  await expect(tabAdmin).toHaveURL(/#\/admin$/);
-  await expect(tabAdmin.getByRole("link", { name: "Admin", exact: true })).toBeVisible();
-  await expect(tabAdmin.getByRole("heading", { name: "Verification Admin" })).toBeVisible();
-  pass("Enter as Admin rejects normal users, authenticates Leon (anupam_dev), shows Admin sidebar, and opens Admin Dashboard");
-
   assert.deepEqual(pageErrors, []);
-  console.log(`All ${passed} QR/Connections/Admin browser checks passed.`);
+  console.log(`All ${passed} QR/Connections browser checks passed.`);
 } finally {
   await browser?.close();
   server.kill("SIGTERM");

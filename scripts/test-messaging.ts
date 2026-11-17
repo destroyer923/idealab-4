@@ -4,6 +4,8 @@
  *
  * Run: npx esbuild scripts/test-messaging.ts --bundle --platform=node --format=esm --alias:@=./src --outfile=/tmp/m.mjs && node /tmp/m.mjs
  */
+import { installMockAuthApi } from "./mock-test-auth";
+
 type Store = Record<string, string>;
 const mk = (s: Store) => ({ getItem: (k: string) => s[k] ?? null, setItem: (k: string, v: string) => void (s[k] = String(v)), removeItem: (k: string) => void delete s[k] });
 const shared: Store = {};
@@ -14,6 +16,7 @@ g.localStorage = mk(shared);
 const useTab = (t: Store) => (g.sessionStorage = mk(t));
 useTab(tabA);
 
+installMockAuthApi();
 const api = await import("../src/lib/api");
 const db = await import("../src/lib/db");
 const { ApiError } = db;
@@ -30,16 +33,6 @@ const throwsKey = async (fn: () => unknown, key: string, m: string) => {
   }
 };
 const persisted = () => JSON.parse(shared["skillswap-rural.db.v1"]); // what is actually stored
-
-/** Completes phone + email verification and submits an identity declaration. */
-async function verifyAccount(phone: string, email: string) {
-  const p = await api.requestVerificationCode("phone", phone);
-  await api.verifyContactCode("phone", p.demoCode!);
-  const e = await api.requestVerificationCode("email", email);
-  await api.verifyContactCode("email", e.demoCode!);
-  api.submitIdentityVerification({ fullName: "Test User", idReference: "AA-1111-2222", note: "Aadhaar card, pending review." });
-  return api.currentUserId()!;
-}
 
 // Setup: two real accounts registered in two tabs, neither has any listings.
 useTab(tabA);
@@ -140,15 +133,9 @@ ok(api.searchMembers("bilal").length === 1, "unblocking restores search");
 console.log("\nTest 8 — Regression (existing data and features):");
 const before = persisted();
 ok(before.messages.length === 3 && before.users.length === 3, "no messages or users lost");
-// complete verification so the listing can be published
 useTab(tabA);
-await verifyAccount("+91 9876543210", "asha@x.in");
-useTab(tabB);
-// Test-only fixture for an already provisioned administrator.
-db.transact((state) => { state.users.find((u) => u.id === B)!.role = "admin"; });
-api.reviewIdentityVerification(A, "approve");
-useTab(tabA);
-const offer = api.createListing("offer", { title: "Packaging design", category: "Design", type: "Service", description: "Labels and boxes for small food brands.", details: "Packaging design", exchangePref: "", location: "", availability: "", mode: "", quantity: "", tags: [], images: [] }, true);
+const offer = await api.createListing("offer", { title: "Packaging design", category: "Design", type: "Service", description: "Labels and boxes for small food brands.", details: "Packaging design", exchangePref: "", location: "", availability: "", mode: "", quantity: "", tags: [], images: [] }, true);
+db.transact((state) => { state.listings.push(offer); });
 useTab(tabB);
 const ctxConv = await api.openConversation(A, "listing", offer.id);
 ok(ctxConv !== conv, "a listing-context conversation stays separate from the direct chat");

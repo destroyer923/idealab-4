@@ -9,7 +9,6 @@ import { L, useI18n, useT } from "@/lib/i18n";
 import { categoryImage } from "@/lib/images";
 import type { Listing, PublicMember } from "@/lib/types";
 import { Avatar, Badge, Button, Field, Input, Modal, Select, Textarea, errMsg, focusRing, toast, type Tone } from "./ui";
-import { TrustBadges } from "./trust";
 
 export const kindTone = (k: Listing["kind"]): Tone => (k === "offer" ? "green" : "amber");
 
@@ -152,9 +151,6 @@ export function ListingCard({ listing, owner, saved, showOwner = true, footer, o
                   <span className="truncate text-slate-500">{owner.fullName}</span>
                 )}
                 <span className="text-slate-400"> · {owner.occupation || ago(listing.createdAt)}</span>
-                {owner.verification && (
-                  <TrustBadges v={owner.verification} className="mt-1" spacing="gap-x-2" />
-                )}
               </div>
               <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-300 transition-transform group-hover:translate-x-0.5 group-hover:text-[#541B2B]" aria-hidden />
             </div>

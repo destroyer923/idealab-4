@@ -1,13 +1,11 @@
 import { useState } from "react";
-import { ArrowLeft, Ban, CalendarDays, Clock, Handshake, Inbox, Layers, MapPin, Pencil, RefreshCw, Tag, Wifi } from "lucide-react";
+import { ArrowLeft, Ban, CalendarDays, Clock, Handshake, Inbox, Layers, MapPin, Pencil, Tag, Wifi } from "lucide-react";
 import { getListing, getListingResponses, getSavedIds } from "@/lib/api";
 import { useQuery } from "@/lib/hooks";
 import { L, useI18n } from "@/lib/i18n";
 import { Link } from "@/lib/router";
 import { cn } from "@/utils/cn";
-import { Avatar, Button, Card, EmptyState, ErrorState, LinkButton, errMsg, focusRing, toast } from "@/components/ui";
-import { TrustBadges } from "@/components/trust";
-import { resubmitListing, listingReviewReason } from "@/lib/api";
+import { Avatar, Button, Card, EmptyState, ErrorState, LinkButton, focusRing } from "@/components/ui";
 import { KindBadge, MessageButton, ProposeExchangeDialog, SaveButton, StatusBadge } from "@/components/listing";
 import { ExchangeStatusBadge } from "./Exchange";
 
@@ -64,23 +62,6 @@ export default function ListingDetail({ id }: { id: string }) {
               <h1 className="display mt-2 break-words text-[34px] font-semibold text-[#541B2B]">{l.title}</h1>
               <p className="mt-3 whitespace-pre-line break-words text-sm leading-relaxed text-slate-600">{l.description}</p>
 
-              {l.status === "pending_review" && (
-                <div className="mt-4 border-l-2 border-[#A45A16] bg-[#A45A16]/5 p-4 text-sm text-[#A45A16]">
-                  {t("verify.listingReviewing")}
-                  {listingReviewReason(l) && <> — {t(listingReviewReason(l)!.key, listingReviewReason(l)!.vars)}</>}
-                </div>
-              )}
-              {l.status === "rejected" && (
-                <div className="mt-4 border-l-2 border-[#B42335] bg-[#B42335]/5 p-4 text-sm text-[#B42335]">
-                  {t("verify.listingRejected")}
-                  {listingReviewReason(l)?.vars?.reason && <> — {t("verify.listingRejectedDetail", { reason: listingReviewReason(l)!.vars!.reason })}</>}
-                  {isOwner && (
-                    <div className="mt-2">
-                      <Button size="sm" variant="soft" icon={RefreshCw} onClick={() => { try { resubmitListing(l.id); toast.success(t("ml.resubmit")); } catch (e) { toast.error(errMsg(e)); } }}>{t("ml.resubmit")}</Button>
-                    </div>
-                  )}
-                </div>
-              )}
               <div className="mt-5 grid gap-3 sm:grid-cols-2">
                 <div className={cn("border-l-2 p-4", isOffer ? "border-[#541B2B] bg-[#FFF8F0]" : "border-[#A45A16] bg-amber-50/60")}>
                   <p className={cn("text-[11px] font-semibold uppercase tracking-wide", isOffer ? "text-emerald-700" : "text-amber-700")}>{t(isOffer ? "listing.theyProvide" : "listing.theyNeed")}</p>
@@ -153,8 +134,6 @@ export default function ListingDetail({ id }: { id: string }) {
                   <p className="truncate font-semibold text-slate-900">{owner.fullName}</p>
                   <p className="truncate text-sm text-slate-500">{owner.occupation || (owner.username ? `@${owner.username}` : "")}</p>
                   {owner.location && <p className="flex items-center gap-1 text-xs text-slate-400"><MapPin className="h-3 w-3" />{owner.location}</p>}
-              {owner.verification && <TrustBadges v={owner.verification} className="mt-2" />}
-              {owner.verification && <TrustBadges v={owner.verification} className="mt-2" />}
                 </div>
               </div>
               {owner.username && <LinkButton to={`/u/${owner.username}`} variant="secondary" size="sm" className="mt-4 w-full">{t("common.viewProfile")}</LinkButton>}

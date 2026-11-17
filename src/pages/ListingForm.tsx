@@ -1,10 +1,9 @@
 import { useRef, useState } from "react";
-import { ArrowLeft, CheckCircle2, Circle, ImagePlus, Loader2, Save, Send, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Circle, ImagePlus, Loader2, Save, Send, ShieldAlert, Trash2 } from "lucide-react";
 import { cn } from "@/utils/cn";
 import {
   createListing, getListing, updateListing, validateListing, type ListingInput,
 } from "@/lib/api";
-import { getPublishEligibility, getVerification } from "@/lib/verification-api";
 import { CATEGORIES, LIMITS, MODES, NEED_TYPES, OFFER_TYPES } from "@/lib/constants";
 import { useQuery } from "@/lib/hooks";
 import { L, useI18n, type Key } from "@/lib/i18n";
@@ -12,7 +11,6 @@ import { processImage } from "@/lib/format";
 import { Link, navigate } from "@/lib/router";
 import type { Listing, ListingKind } from "@/lib/types";
 import { Button, Card, EmptyState, Field, Input, LinkButton, Select, Textarea, errMsg, focusRing, toast } from "@/components/ui";
-import { TrustBadges, TrustLevel } from "@/components/trust";
 
 const emptyInput = (): ListingInput => ({ title: "", category: "", type: "", description: "", details: "", exchangePref: "", location: "", availability: "", mode: "", quantity: "", tags: [], images: [] });
 
@@ -35,7 +33,6 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
   const k = (offer: Key, need: Key) => t(isOffer ? offer : need);
   const [f, setF] = useState<ListingInput>(() => (existing ? { ...existing } : emptyInput()));
   const [tagText, setTagText] = useState(existing?.tags.join(", ") ?? "");
-  const [businessClaimed, setBusinessClaimed] = useState(!!existing?.businessClaimed);
   const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState<null | "draft" | "publish">(null);
   const [imgBusy, setImgBusy] = useState(0);
@@ -51,9 +48,6 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
   };
   const base = isOffer ? "/offers" : "/needs";
   const isDraft = !existing || existing.status === "draft";
-  const verQuery = useQuery(getVerification, []);
-  const eligibilityQuery = useQuery(() => getPublishEligibility(businessClaimed, f.category), [businessClaimed, f.category]);
-  const eligibility = eligibilityQuery.data ?? { ok: false, required: [], missing: [] };
 
   const submit = async (publish: boolean) => {
     setTouched(true);
@@ -62,23 +56,13 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
       requestAnimationFrame(() => document.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
       return;
     }
-    if (publish && !eligibility.ok) {
-      setServerError(t("verify.err.publishBlocked", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") }));
-      return;
-    }
     setBusy(publish ? "publish" : "draft");
     try {
-      const withClaim = { ...input, businessClaimed };
-      const saved = await (existing ? updateListing(existing.id, withClaim, publish) : createListing(kind, withClaim, publish));
-      const pending = saved.status === "pending_review";
-      toast.success(
-        pending
-          ? t("verify.listingReviewing")
-          : existing
-            ? (publish && isDraft ? t("lf.published") : t("lf.saved"))
-            : publish ? k("lf.publishedOffer", "lf.publishedNeed")
-            : t("lf.draftSaved")
-      );
+      const saved = await (existing ? updateListing(existing.id, input, publish) : createListing(kind, input, publish));
+      toast.success(existing
+        ? (publish && isDraft ? t("lf.published") : t("lf.saved"))
+        : publish ? k("lf.publishedOffer", "lf.publishedNeed")
+        : t("lf.draftSaved"));
       navigate(publish || !existing ? `/listing/${saved.id}` : base);
     } catch (e) {
       setServerError(errMsg(e));
@@ -119,49 +103,6 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
       <Link to={base} className={cn("mb-4 inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-emerald-700", focusRing)}><ArrowLeft className="h-4 w-4" /> {k("nav.offers", "nav.needs")}</Link>
       <h1 className="display text-[32px] font-semibold text-[#541B2B]">{existing ? k("lf.editOffer", "lf.editNeed") : k("lf.createOffer", "action.postNeed")}</h1>
       <p className="mb-6 mt-1 text-sm text-slate-500">{k("lf.offerIntro", "lf.needIntro")}</p>
-
-      {/* Mandatory verification — the same rule the server enforces */}
-      <Card className="border-l-2 border-l-[#E9DFDC] p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#8a3b44]">{t("verify.eyebrow")}</p>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-              <TrustLevel trust={verQuery.data?.verification.trust ?? "new"} />
-              <TrustBadges
-                v={{
-                  phoneVerified: verQuery.data?.verification.phone.status === "verified",
-                  emailVerified: verQuery.data?.verification.email.status === "verified",
-                  businessVerified: verQuery.data?.verification.business.status === "verified",
-                  identityVerified: verQuery.data?.verification.identity.status === "verified",
-                  completedExchanges: verQuery.data?.verification.completedExchanges ?? 0,
-                  trust: verQuery.data?.verification.trust ?? "new",
-                }}
-              />
-            </div>
-
-            <ul className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5">
-              {eligibility.required.map((step) => {
-                const done = step.status === "verified";
-                return (
-                  <li key={step.channel} className="flex items-center gap-2">
-                    {done ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-[#26734D]" /> : <Circle className="h-3.5 w-3.5 shrink-0 text-[#A45A16]" />}
-                    <span className={cn("text-[12.5px]", done ? "text-slate-500" : "font-medium text-[#29232A]")}>
-                      {t(step.key)}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-
-            {!eligibility.ok && (
-              <p className="mt-2 text-[12.5px] text-[#A45A16]">
-                {t("verify.publishBlockedNote", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") })}
-              </p>
-            )}
-          </div>
-          <LinkButton to="/verification" variant="link" size="sm" icon={ShieldCheck}>{t("verify.formLink")}</LinkButton>
-        </div>
-      </Card>
 
       <form className="grid gap-6 lg:grid-cols-[1fr_300px]" onSubmit={(e) => { e.preventDefault(); void submit(true); }} noValidate>
         <div className="min-w-0 space-y-5">
@@ -245,13 +186,6 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
                   {MODES.map((m) => <option key={m} value={m}>{t(L.mode(m))}</option>)}
                 </Select>
               </Field>
-              <label className="flex items-start gap-2.5 pt-1 text-[13px] text-slate-600">
-                <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0 accent-[#541B2B]" checked={businessClaimed} onChange={(e) => setBusinessClaimed(e.target.checked)} />
-                <span>
-                  <span className="font-medium text-slate-700">{t("verify.formBusinessClaim")}</span>
-                  <span className="block text-[11.5px] text-slate-500">{t("verify.formBusinessClaimHint")}</span>
-                </span>
-              </label>
             </div>
           </Section>
         </div>
@@ -272,7 +206,7 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
                 </li>
               ))}
             </ul>
-            {(serverError || eligibilityQuery.error) && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{serverError || eligibilityQuery.error}</p>}
+            {serverError && <p role="alert" className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{serverError}</p>}
             {touched && Object.keys(errors).length > 0 && <p role="alert" className="mt-3 text-xs text-red-600">{t("lf.fixFields")}</p>}
             <div className="mt-4 space-y-2">
               <Button
@@ -280,8 +214,7 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
                 className="w-full"
                 icon={Send}
                 loading={busy === "publish"}
-                disabled={!!busy || imgBusy > 0 || !eligibilityQuery.data?.ok}
-                title={eligibilityQuery.error ?? (eligibility.ok ? undefined : t("verify.err.publishBlocked", { steps: eligibility.missing.map((s) => t(s.key)).join(", ") }))}
+                disabled={!!busy || imgBusy > 0 || Object.keys(errors).length > 0}
               >
                 {isDraft ? k("lf.publishOffer", "lf.publishNeed") : t("lf.saveChanges")}
               </Button>
@@ -289,9 +222,6 @@ function Form({ kind, existing }: { kind: ListingKind; existing?: Listing }) {
               <Button type="button" variant="ghost" className="w-full" onClick={() => navigate(base)} disabled={!!busy}>{t("common.cancel")}</Button>
             </div>
             {isDraft && <p className="mt-3 text-[11px] text-slate-400">{k("lf.draftNoteOffer", "lf.draftNoteNeed")}</p>}
-            {!eligibility.ok && isDraft && (
-              <p className="mt-2 text-[11px] text-[#A45A16]">{t("verify.draftVerifiedNote")}</p>
-            )}
           </Card>
         </aside>
       </form>

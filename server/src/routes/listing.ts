@@ -2,44 +2,17 @@ import { Router } from "express";
 import { z } from "zod";
 import { ListingModel } from "../models/Listing.js";
 import { UserModel } from "../models/User.js";
-import { VerificationModel, VerifyConfigModel, VerifyEventModel, VerificationRecord } from "../models/Verification.js";
 import { requireAuth, type AuthenticatedRequest } from "../middleware/auth.js";
-import { verificationEligibility } from "../verification/policy.js";
+import { validateListingContent } from "../listing/validation.js";
 
 const router = Router();
 
-async function publishEligibility(userId: string, options: { businessClaimed: boolean; category: string }) {
-  const [verification, config] = await Promise.all([
-    VerificationModel.findOne({ userId }).lean<VerificationRecord>(),
-    VerifyConfigModel.findOne({ key: "platform" }).lean(),
-  ]);
-  const requiredBusinessCategories = config?.requiredBusinessCategories ?? [];
-  const safeVerification = verification ?? {
-    phone: { status: "not_started" },
-    email: { status: "not_started" },
-    identity: { status: "not_started" },
-    business: { status: "not_started" },
-  };
-  return verificationEligibility(safeVerification, requiredBusinessCategories, options);
-}
-
-function publicVerification(verification: VerificationRecord | null | undefined) {
-  return {
-    phoneVerified: verification?.phone.status === "verified",
-    emailVerified: verification?.email.status === "verified",
-    businessVerified: verification?.business.status === "verified",
-    identityVerified: verification?.identity.status === "verified",
-    completedExchanges: verification?.completedExchanges ?? 0,
-    trust: verification?.trust ?? "new",
-  };
-}
-
 const listingSchema = z.object({
-  title: z.string().trim().min(4).max(200),
-  category: z.string().min(1),
-  type: z.string().min(1),
-  description: z.string().trim().min(20).max(4000),
-  details: z.string().trim().min(3).max(4000),
+  title: z.string().trim(),
+  category: z.string().trim(),
+  type: z.string().trim(),
+  description: z.string().trim(),
+  details: z.string().trim(),
   exchangePref: z.string().trim().max(2000).optional().default(""),
   location: z.string().trim().max(200).optional().default(""),
   availability: z.string().trim().max(200).optional().default(""),
@@ -47,19 +20,18 @@ const listingSchema = z.object({
   quantity: z.string().trim().max(200).optional().default(""),
   tags: z.array(z.string()).optional().default([]),
   images: z.array(z.string()).optional().default([]),
-  businessClaimed: z.boolean().optional().default(false),
   publish: z.boolean().optional().default(false),
 });
 
 const statusTransitions: Record<string, string[]> = {
-  "offer:draft": ["active", "pending_review"],
+  "offer:draft": ["active"],
   "offer:pending_review": ["active", "inactive"],
   "offer:active": ["inactive"],
   "offer:inactive": ["active"],
-  "offer:rejected": ["active", "pending_review", "draft"],
-  "need:draft": ["open", "pending_review"],
+  "offer:rejected": ["active", "draft"],
+  "need:draft": ["open"],
   "need:pending_review": ["open", "paused"],
-  "need:rejected": ["open", "pending_review", "draft"],
+  "need:rejected": ["open", "draft"],
   "need:open": ["matched", "paused", "fulfilled"],
   "need:matched": ["open", "paused", "fulfilled", "in_progress"],
   "need:in_progress": ["fulfilled", "paused", "open"],
@@ -85,23 +57,31 @@ function normalizeListing(input: z.infer<typeof listingSchema>, ownerId: string,
     quantity: input.quantity.trim(),
     tags: [...new Set(input.tags.map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 8),
     images: input.images.slice(0, 12),
-    businessClaimed: !!input.businessClaimed,
     status: input.publish ? (kind === "offer" ? "active" : "open") : "draft",
     createdAt: now,
     updatedAt: now,
   };
 }
 
+function contentError(input: { title: string; category: string; type: string; description: string; details: string }, kind: "offer" | "need") {
+  const errors = validateListingContent(input, kind);
+  const first = Object.entries(errors)[0];
+  if (!first) return undefined;
+  const [field, message] = first;
+  const max = field === "title" ? 100 : field === "description" ? 1500 : 800;
+  return { message, vars: message === "err.maxLength" ? { max } : undefined };
+}
+
+function invalidListing(res: import("express").Response, message = "err.invalidListing", vars?: Record<string, number>) {
+  res.status(400).json({ code: "invalid_listing", message, vars });
+}
+
 router.get("/public", async (_req, res) => {
   try {
     const items = await ListingModel.find({ status: { $in: ["active", "open", "matched"] }, deletedAt: { $exists: false } }).sort({ createdAt: -1 }).lean();
     const ownerIds = [...new Set(items.map((item) => item.ownerId))];
-    const [owners, verifications] = await Promise.all([
-      UserModel.find({ id: { $in: ownerIds } }).select("id profile").lean(),
-      VerificationModel.find({ userId: { $in: ownerIds } }).lean<VerificationRecord[]>(),
-    ]);
+    const owners = await UserModel.find({ id: { $in: ownerIds } }).select("id profile").lean();
     const profiles = new Map(owners.map((owner) => [owner.id, owner.profile]));
-    const verificationByUser = new Map(verifications.map((verification) => [verification.userId, verification]));
     res.json(items.map((listing) => {
       const profile = profiles.get(listing.ownerId);
       return {
@@ -113,7 +93,6 @@ router.get("/public", async (_req, res) => {
           occupation: profile?.occupation ?? "",
           avatar: profile?.avatar,
           location: profile?.visibility?.location ? profile.location : undefined,
-          verification: publicVerification(verificationByUser.get(listing.ownerId)),
         },
       };
     }));
@@ -141,10 +120,8 @@ router.get("/:id", async (req, res) => {
       res.status(404).json({ code: "not_found", message: "Listing not found" });
       return;
     }
-
     const user = await UserModel.findOne({ id: listing.ownerId }).select("profile").lean();
     const profile = user?.profile;
-    const verification = await VerificationModel.findOne({ userId: listing.ownerId }).lean<VerificationRecord>();
     res.json({
       listing,
       owner: {
@@ -154,7 +131,6 @@ router.get("/:id", async (req, res) => {
         occupation: profile?.occupation ?? "",
         avatar: profile?.avatar,
         location: profile?.visibility?.location ? profile.location : undefined,
-        verification: publicVerification(verification),
       },
       isOwner: false,
       unavailable: null,
@@ -168,23 +144,20 @@ router.get("/:id", async (req, res) => {
 
 router.post("/:kind", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const kind = req.params.kind === "need" ? "need" : "offer";
-    const parsed = listingSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ code: "invalid_listing", message: "Listing payload is invalid" });
+    if (req.params.kind !== "need" && req.params.kind !== "offer") {
+      invalidListing(res, "err.type");
       return;
     }
-
-    if (parsed.data.publish) {
-      const eligibility = await publishEligibility(req.user!.id, parsed.data);
-      if (!eligibility.ok) {
-        res.status(403).json({
-          code: "verification_required",
-          message: "verify.err.publishBlocked",
-          vars: { steps: eligibility.missing.map((step) => step.key).join(", ") },
-        });
-        return;
-      }
+    const kind = req.params.kind;
+    const parsed = listingSchema.safeParse(req.body);
+    if (!parsed.success) {
+      invalidListing(res);
+      return;
+    }
+    const contentIssue = contentError(parsed.data, kind);
+    if (contentIssue) {
+      invalidListing(res, contentIssue.message, contentIssue.vars);
+      return;
     }
 
     const record = normalizeListing(parsed.data, req.user!.id, kind);
@@ -200,7 +173,7 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const parsed = listingSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ code: "invalid_listing", message: "Listing payload is invalid" });
+      invalidListing(res);
       return;
     }
 
@@ -210,16 +183,10 @@ router.put("/:id", requireAuth, async (req: AuthenticatedRequest, res) => {
       return;
     }
 
-    if (parsed.data.publish) {
-      const eligibility = await publishEligibility(req.user!.id, parsed.data);
-      if (!eligibility.ok) {
-        res.status(403).json({
-          code: "verification_required",
-          message: "verify.err.publishBlocked",
-          vars: { steps: eligibility.missing.map((step) => step.key).join(", ") },
-        });
-        return;
-      }
+    const contentIssue = contentError(parsed.data, current.kind);
+    if (contentIssue) {
+      invalidListing(res, contentIssue.message, contentIssue.vars);
+      return;
     }
 
     const kind = current.kind;
@@ -254,13 +221,9 @@ router.patch("/:id/status", requireAuth, async (req: AuthenticatedRequest, res) 
       return;
     }
     if (nextStatus === "active" || nextStatus === "open") {
-      const eligibility = await publishEligibility(req.user!.id, { businessClaimed: listing.businessClaimed, category: listing.category });
-      if (!eligibility.ok) {
-        res.status(403).json({
-          code: "verification_required",
-          message: "verify.err.publishBlocked",
-          vars: { steps: eligibility.missing.map((step) => step.key).join(", ") },
-        });
+      const contentIssue = contentError(listing, listing.kind);
+      if (contentIssue) {
+        invalidListing(res, contentIssue.message, contentIssue.vars);
         return;
       }
     }
@@ -270,49 +233,6 @@ router.patch("/:id/status", requireAuth, async (req: AuthenticatedRequest, res) 
     res.json(listing);
   } catch (error) {
     console.error("Update listing status error:", error);
-    res.status(500).json({ code: "server_error", message: "err.generic" });
-  }
-});
-
-router.post("/:id/resubmit", requireAuth, async (req: AuthenticatedRequest, res) => {
-  try {
-    const listing = await ListingModel.findOne({ id: req.params.id, ownerId: req.user!.id, deletedAt: { $exists: false } });
-    if (!listing) {
-      res.status(404).json({ code: "not_found", message: "err.listingGone" });
-      return;
-    }
-    if (listing.status !== "rejected") {
-      res.status(409).json({ code: "not_rejected", message: "verify.err.notRejected" });
-      return;
-    }
-    const eligibility = await publishEligibility(req.user!.id, { businessClaimed: listing.businessClaimed, category: listing.category });
-    if (!eligibility.ok) {
-      res.status(403).json({
-        code: "verification_required",
-        message: "verify.err.publishBlocked",
-        vars: { steps: eligibility.missing.map((step) => step.key).join(", ") },
-      });
-      return;
-    }
-    listing.status = listing.kind === "offer" ? "active" : "open";
-    listing.reviewReason = undefined;
-    listing.reviewReasonVars = undefined;
-    listing.reviewedBy = undefined;
-    listing.reviewedAt = undefined;
-    listing.updatedAt = new Date().toISOString();
-    await listing.save();
-    await VerifyEventModel.create({
-      id: crypto.randomUUID(),
-      userId: req.user!.id,
-      actorId: req.user!.id,
-      type: "listing_resubmitted",
-      key: "verify.ev.resubmittedPublished",
-      vars: { title: listing.title },
-      createdAt: listing.updatedAt,
-    });
-    res.json(listing);
-  } catch (error) {
-    console.error("Resubmit listing error:", error);
     res.status(500).json({ code: "server_error", message: "err.generic" });
   }
 });

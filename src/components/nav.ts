@@ -1,4 +1,4 @@
-import { Gavel, Bookmark, ClipboardList, Compass, Handshake, LayoutDashboard, MessageCircle, Package, PlusCircle, QrCode, ScanLine, Settings, ShieldCheck, Star, UserRound, Users, type LucideIcon } from "lucide-react";
+import { Bookmark, ClipboardList, Compass, Handshake, LayoutDashboard, MessageCircle, Package, PlusCircle, QrCode, ScanLine, Settings, Star, UserRound, Users, type LucideIcon } from "lucide-react";
 import type { Key } from "@/lib/i18n";
 
 export interface NavItem {
@@ -8,8 +8,6 @@ export interface NavItem {
   /** Extra path prefixes that should keep this item highlighted. */
   match?: string[];
   badge?: "unreadMessages";
-  /** Only shown to administrators. */
-  adminOnly?: boolean;
 }
 
 export const NAV_GROUPS: { label: Key; items: NavItem[] }[] = [
@@ -39,8 +37,6 @@ export const NAV_GROUPS: { label: Key; items: NavItem[] }[] = [
     items: [
       { label: "nav.profile", to: "/profile", icon: UserRound, match: ["/u/"] },
       { label: "nav.reviews", to: "/reviews", icon: Star },
-      { label: "nav.verification", to: "/verification", icon: ShieldCheck },
-      { label: "admin.navLabel", to: "/admin", icon: Gavel, adminOnly: true },
       { label: "nav.settings", to: "/settings", icon: Settings },
     ],
   },

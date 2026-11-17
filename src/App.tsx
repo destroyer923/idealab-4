@@ -24,8 +24,6 @@ import MyProfile, { PublicProfile } from "@/pages/Profile";
 import ProfileEdit from "@/pages/ProfileEdit";
 import Reviews from "@/pages/Reviews";
 import Settings from "@/pages/Settings";
-import Verification from "@/pages/Verification";
-import Admin from "@/pages/Admin";
 
 function Routes({ me }: { me: string }) {
   const { path } = useLocation();
@@ -56,8 +54,6 @@ function Routes({ me }: { me: string }) {
   if (path === "/profile/edit") return <ProfileEdit />;
   if ((p = m("/u/:username"))) return <PublicProfile key={p.username} username={p.username} />;
   if (path === "/reviews") return <Reviews />;
-  if (path === "/verification") return <Verification />;
-  if (path === "/admin") return <Admin />;
   if (path === "/settings") return <Settings />;
   return (
     <EmptyState icon={Compass} title={t("app.notFoundTitle")} body={t("app.notFoundBody")}>

@@ -3,12 +3,13 @@ import { Router } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { isDuplicateKeyError, normalizeEmail, registrationAccountExists, verifyPasswordAndUpgrade } from "../auth/password.js";
+import { AUTH_RATE_LIMITS, createRateLimiter, type RateLimitConfig } from "../middleware/rateLimit.js";
 import { UserModel } from "../models/User.js";
 
-const router = Router();
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[a-z0-9_]{3,24}$/;
 const PASSWORD_MAX_LENGTH = 128;
+type AuthRateLimits = { login: RateLimitConfig; register: RateLimitConfig };
 
 function jwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -42,106 +43,114 @@ function publicUser(user: {
   };
 }
 
-router.post("/register", async (req, res) => {
-  try {
-    const secret = jwtSecret();
-    const body = requestBody(req.body);
-    const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
-    const password = typeof body.password === "string" ? body.password : "";
-    const fullName = typeof body.fullName === "string" ? body.fullName.trim() : "";
-    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
-    const language = body.language === "en" || body.language === "hi" || body.language === "mr"
-      ? body.language
-      : "en";
+export function createAuthRouter(rateLimits: AuthRateLimits = AUTH_RATE_LIMITS) {
+  const router = Router();
+  const loginLimiter = createRateLimiter(rateLimits.login);
+  const registerLimiter = createRateLimiter(rateLimits.register);
 
-    if (email.length > 254 || !EMAIL_RE.test(email)) {
-      res.status(400).json({ code: "invalid_email", message: "Invalid email address" });
-      return;
-    }
-    if (fullName.length < 2 || fullName.length > 80) {
-      res.status(400).json({ code: "invalid_full_name", message: "Enter a name between 2 and 80 characters" });
-      return;
-    }
-    if (!USERNAME_RE.test(username)) {
-      res.status(400).json({ code: "invalid_username", message: "Username must be 3 to 24 letters, numbers, or underscores" });
-      return;
-    }
-    if (password.length < 8 || password.length > PASSWORD_MAX_LENGTH) {
-      res.status(400).json({ code: "invalid_password", message: "Password must be between 8 and 128 characters" });
-      return;
-    }
+  router.post("/register", registerLimiter, async (req, res) => {
+    try {
+      const secret = jwtSecret();
+      const body = requestBody(req.body);
+      const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
+      const password = typeof body.password === "string" ? body.password : "";
+      const fullName = typeof body.fullName === "string" ? body.fullName.trim() : "";
+      const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
+      const language = body.language === "en" || body.language === "hi" || body.language === "mr"
+        ? body.language
+        : "en";
 
-    const existing = await registrationAccountExists(
-      (filter) => UserModel.findOne(filter).select("_id").exec(),
-      email,
-      username,
-    );
-    if (existing) {
-      res.status(409).json({ code: "account_exists", message: "Email or username is already registered" });
-      return;
-    }
+      if (email.length > 254 || !EMAIL_RE.test(email)) {
+        res.status(400).json({ code: "invalid_email", message: "Invalid email address" });
+        return;
+      }
+      if (fullName.length < 2 || fullName.length > 80) {
+        res.status(400).json({ code: "invalid_full_name", message: "Enter a name between 2 and 80 characters" });
+        return;
+      }
+      if (!USERNAME_RE.test(username)) {
+        res.status(400).json({ code: "invalid_username", message: "Username must be 3 to 24 letters, numbers, or underscores" });
+        return;
+      }
+      if (password.length < 8 || password.length > PASSWORD_MAX_LENGTH) {
+        res.status(400).json({ code: "invalid_password", message: "Password must be between 8 and 128 characters" });
+        return;
+      }
 
-    const id = randomUUID();
-    const passwordHash = await bcrypt.hash(password, 12);
-    const user = await UserModel.create({
-      id,
-      email,
-      passwordHash,
-      role: "member",
-      status: "active",
-      profile: {
-        userId: id,
-        fullName,
+      const existing = await registrationAccountExists(
+        (filter) => UserModel.findOne(filter).select("_id").exec(),
+        email,
         username,
-        language,
-        qrToken: randomUUID(),
-      },
-    });
+      );
+      if (existing) {
+        res.status(409).json({ code: "account_exists", message: "Email or username is already registered" });
+        return;
+      }
 
-    res.status(201).json({
-      token: makeToken(user.id, secret),
-      user: publicUser(user),
-    });
-  } catch (error) {
-    if (isDuplicateKeyError(error)) {
-      res.status(409).json({ code: "account_exists", message: "Email or username is already registered" });
-      return;
+      const id = randomUUID();
+      const passwordHash = await bcrypt.hash(password, 12);
+      const user = await UserModel.create({
+        id,
+        email,
+        passwordHash,
+        role: "member",
+        status: "active",
+        profile: {
+          userId: id,
+          fullName,
+          username,
+          language,
+          qrToken: randomUUID(),
+        },
+      });
+
+      res.status(201).json({
+        token: makeToken(user.id, secret),
+        user: publicUser(user),
+      });
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        res.status(409).json({ code: "account_exists", message: "Email or username is already registered" });
+        return;
+      }
+      console.error("Registration error:", error);
+      res.status(500).json({ code: "server_error", message: "Registration failed" });
     }
-    console.error("Registration error:", error);
-    res.status(500).json({ code: "server_error", message: "Registration failed" });
-  }
-});
+  });
 
-router.post("/login", async (req, res) => {
-  try {
-    const secret = jwtSecret();
-    const body = requestBody(req.body);
-    const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
-    const password = typeof body.password === "string" ? body.password : "";
+  router.post("/login", loginLimiter, async (req, res) => {
+    try {
+      const secret = jwtSecret();
+      const body = requestBody(req.body);
+      const email = typeof body.email === "string" ? normalizeEmail(body.email) : "";
+      const password = typeof body.password === "string" ? body.password : "";
 
-    if (email.length > 254 || !EMAIL_RE.test(email) || password.length === 0 || password.length > PASSWORD_MAX_LENGTH) {
-      res.status(401).json({ code: "invalid_credentials", message: "Invalid email or password" });
-      return;
+      if (email.length > 254 || !EMAIL_RE.test(email) || password.length === 0 || password.length > PASSWORD_MAX_LENGTH) {
+        res.status(401).json({ code: "invalid_credentials", message: "Invalid email or password" });
+        return;
+      }
+
+      const user = await UserModel.findOne({ email }).select("+passwordHash +salt");
+      if (!user || !(await verifyPasswordAndUpgrade(password, user))) {
+        res.status(401).json({ code: "invalid_credentials", message: "Invalid email or password" });
+        return;
+      }
+      if (user.status !== "active") {
+        res.status(403).json({ code: "account_suspended", message: "Account is suspended" });
+        return;
+      }
+
+      res.json({
+        token: makeToken(user.id, secret),
+        user: publicUser(user),
+      });
+    } catch (error) {
+      console.error("Login error:", error);
+      res.status(500).json({ code: "server_error", message: "Login failed" });
     }
+  });
 
-    const user = await UserModel.findOne({ email }).select("+passwordHash +salt");
-    if (!user || !(await verifyPasswordAndUpgrade(password, user))) {
-      res.status(401).json({ code: "invalid_credentials", message: "Invalid email or password" });
-      return;
-    }
-    if (user.status !== "active") {
-      res.status(403).json({ code: "account_suspended", message: "Account is suspended" });
-      return;
-    }
+  return router;
+}
 
-    res.json({
-      token: makeToken(user.id, secret),
-      user: publicUser(user),
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ code: "server_error", message: "Login failed" });
-  }
-});
-
-export default router;
+export default createAuthRouter();

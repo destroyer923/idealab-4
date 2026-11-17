@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { ArrowRightLeft, Handshake, Languages, Leaf, ShieldCheck, Sprout } from "lucide-react";
+import { ArrowRightLeft, Handshake, Languages, Leaf, Sprout } from "lucide-react";
 import { cn } from "@/utils/cn";
-import { adminLogin, isAdmin, login, register } from "@/lib/api";
+import { login, register } from "@/lib/api";
 import { LANGUAGES, setVisitorLang, useI18n } from "@/lib/i18n";
 import { PAGE_IMAGES } from "@/lib/images";
 import { navigate } from "@/lib/router";
@@ -34,7 +34,7 @@ function VisitorLanguagePicker({ dark }: { dark?: boolean }) {
 
 export default function AuthPage() {
   const { t, lang } = useI18n();
-  const [mode, setMode] = useState<"signin" | "signup" | "admin">("signin");
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [f, setF] = useState({ email: "", password: "", fullName: "", username: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -56,7 +56,7 @@ export default function AuthPage() {
             {[
               { i: ArrowRightLeft, k: "auth.f1" as const },
               { i: Handshake, k: "auth.f2" as const },
-              { i: ShieldCheck, k: "auth.f3" as const },
+              { i: Leaf, k: "auth.f3" as const },
             ].map(({ i: I, k }) => (
               <li key={k} className="flex items-center gap-3"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[#E8A6A1]/20 text-[#E8A6A1]"><I className="h-4 w-4" /></span>{t(k)}</li>
             ))}
@@ -75,20 +75,19 @@ export default function AuthPage() {
               <span className="font-display text-xl font-semibold text-[#541B2B]">SkillSwap Rural</span>
             </div>
             <h2 className="font-display text-3xl font-semibold text-[#541B2B]">
-              {mode === "signin" ? t("auth.welcome") : mode === "signup" ? t("auth.create") : t("auth.adminTitle")}
+              {mode === "signin" ? t("auth.welcome") : t("auth.create")}
             </h2>
             <p className="mt-1 text-sm text-slate-500">
-              {mode === "signin" ? t("auth.welcomeSub") : mode === "signup" ? t("auth.createSub") : t("auth.adminSub")}
+              {mode === "signin" ? t("auth.welcomeSub") : t("auth.createSub")}
             </p>
             <Tabs
               className="mt-6"
               label={t("auth.mode")}
               value={mode}
-              onChange={(m) => (setMode(m), setError(""))}
+              onChange={(m) => (setMode(m as "signin" | "signup"), setError(""))}
               tabs={[
                 { value: "signin", label: t("auth.signIn") },
                 { value: "signup", label: t("auth.createTab") },
-                { value: "admin", label: t("auth.enterAdmin") },
               ]}
             />
             <form
@@ -98,16 +97,9 @@ export default function AuthPage() {
                 setError("");
                 setBusy(true);
                 try {
-                  if (mode === "admin") {
-                    await adminLogin(f.email, f.password);
-                    navigate("/admin");
-                    return;
-                  }
                   if (mode === "signin") await login(f.email, f.password);
                   else await register({ ...f, language: lang });
-                  // Administrators go to their review area; everyone else to the dashboard.
-                  if (isAdmin()) navigate("/admin");
-                  else navigate("/dashboard");
+                  navigate("/dashboard");
                 } catch (er) {
                   setError(errMsg(er));
                 } finally {
@@ -133,7 +125,7 @@ export default function AuthPage() {
               </Field>
               {error && <p role="alert" className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
               <Button type="submit" loading={busy} className="w-full" size="lg">
-                {mode === "signin" ? t("auth.signIn") : mode === "signup" ? t("auth.createTab") : t("auth.enterAdmin")}
+                {mode === "signin" ? t("auth.signIn") : t("auth.createTab")}
               </Button>
             </form>
             <p className="mt-6 text-center text-xs text-slate-400">{t("auth.storageNote")}</p>

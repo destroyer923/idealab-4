@@ -1,4 +1,4 @@
-import type { DB, UserRole, ProviderConfig, IdentityProviderConfig } from "./types";
+import type { DB, UserRole } from "./types";
 
 /**
  * Persistent client-side data store.
@@ -16,22 +16,6 @@ import type { DB, UserRole, ProviderConfig, IdentityProviderConfig } from "./typ
 const KEY = "skillswap-rural.db.v1";
 const SESSION_KEY = "skillswap-rural.session.v1";
 
-const DEFAULT_PROVIDER = (channel: "phone" | "email"): ProviderConfig => ({ channel, type: "demo", endpoint: "", apiToken: "", label: "Demo" });
-
-/**
- * Identity verification defaults to the reviewer-approved manual workflow: a member submits a
- * declaration and a reviewer must genuinely approve it. `none` would mean no compliant channel
- * exists — in that case publishing is blocked rather than silently skipped.
- */
-const DEFAULT_IDENTITY: IdentityProviderConfig = { channel: "identity", type: "manual", endpoint: "", apiToken: "", label: "Manual review" };
-
-const DEFAULT_VERIFY_CONFIG = {
-  phone: DEFAULT_PROVIDER("phone"),
-  email: DEFAULT_PROVIDER("email"),
-  identity: DEFAULT_IDENTITY,
-  requiredBusinessCategories: [] as string[],
-};
-
 const empty = (): DB => ({
   users: [],
   profiles: [],
@@ -47,10 +31,6 @@ const empty = (): DB => ({
   blocks: [],
   reports: [],
   connections: [],
-  verifications: [],
-  otps: [],
-  verifyEvents: [],
-  verifyConfig: structuredClone(DEFAULT_VERIFY_CONFIG),
 });
 
 export class ApiError extends Error {
@@ -76,10 +56,10 @@ const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("
  * written before this feature existed.
  */
 function migrate(db: DB): DB {
-  const out = empty();
+  const out = { ...db, ...empty() };
   out.users = db.users.map((u) => ({ ...u, role: (u.role === "reviewer" || u.role === "admin" ? u.role : "member") as UserRole, status: (u.status === "suspended" ? "suspended" : "active") as "active" | "suspended" }));
   out.profiles = db.profiles.map((p) => ({ ...p, visibility: { ...p.visibility }, prefs: { ...p.prefs }, portfolio: p.portfolio ?? [] }));
-  out.listings = db.listings.map((l) => ({ ...l, businessClaimed: !!l.businessClaimed }));
+  out.listings = db.listings;
   out.exchanges = db.exchanges;
   out.milestones = db.milestones;
   out.events = db.events;
@@ -91,32 +71,6 @@ function migrate(db: DB): DB {
   out.blocks = db.blocks;
   out.reports = db.reports;
   out.connections = db.connections ?? [];
-  out.otps = db.otps ?? [];
-  out.verifyEvents = db.verifyEvents ?? [];
-  out.verifyConfig = {
-    ...DEFAULT_VERIFY_CONFIG,
-    ...db.verifyConfig,
-    phone: { ...DEFAULT_VERIFY_CONFIG.phone, ...db.verifyConfig.phone },
-    email: { ...DEFAULT_VERIFY_CONFIG.email, ...db.verifyConfig.email },
-    identity: { ...DEFAULT_VERIFY_CONFIG.identity, ...db.verifyConfig.identity },
-    requiredBusinessCategories: db.verifyConfig.requiredBusinessCategories ?? [],
-  };
-  out.verifications = db.verifications
-    .map((v) => ({ ...v, completedExchanges: v.completedExchanges ?? 0 }));
-  // Recreate a verification record for any member that has none.
-  for (const u of out.users) {
-    if (!out.verifications.some((v) => v.userId === u.id))
-      out.verifications.push({
-        userId: u.id,
-        phone: { status: "not_started", masked: "", attempts: 0 },
-        email: { status: "not_started", masked: "", attempts: 0 },
-        business: { status: "not_started" },
-        identity: { status: "not_started" },
-        completedExchanges: out.exchanges.filter((x) => x.status === "completed" && (x.requesterId === u.id || x.recipientId === u.id)).length,
-        trust: "new",
-        updatedAt: now(),
-      });
-  }
   return out;
 }
 
