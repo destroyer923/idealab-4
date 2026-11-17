@@ -10,7 +10,7 @@ import listingRouter from "./routes/listing.js";
 const app = express();
 const PORT = Number(process.env.PORT) || 5000;
 
-app.set("trust proxy", false);
+app.set("trust proxy", 1);
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:5173",

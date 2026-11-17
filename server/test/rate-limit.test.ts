@@ -77,6 +77,7 @@ await test("auth limits allow normal signup and login, then return consistent 42
   ];
 
   const app = express();
+  app.set("trust proxy", 1);
   app.use(express.json());
   app.use("/api/auth", createAuthRouter({
     login: { windowMs: 60_000, limit: 1 },
@@ -118,7 +119,7 @@ await test("auth limits allow normal signup and login, then return consistent 42
       });
       assert.equal(login.status, 200);
 
-      const blockedLogin = await fetch(`${baseUrl}/api/auth/login`, {
+      const forwardedLogin = await fetch(`${baseUrl}/api/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -126,8 +127,18 @@ await test("auth limits allow normal signup and login, then return consistent 42
         },
         body: JSON.stringify(loginPayload),
       });
-      assert.equal(blockedLogin.status, 429);
-      assert.deepEqual(await blockedLogin.json(), {
+      assert.equal(forwardedLogin.status, 200);
+
+      const repeatedLogin = await fetch(`${baseUrl}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "203.0.113.42",
+        },
+        body: JSON.stringify(loginPayload),
+      });
+      assert.equal(repeatedLogin.status, 429);
+      assert.deepEqual(await repeatedLogin.json(), {
         code: "rate_limited",
         message: "Too many requests. Please try again later.",
       });
